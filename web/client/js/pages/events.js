@@ -53,6 +53,7 @@ function getPClass(peakG) {
 function normalise(d) {
     const sev = (d.severity || '').toLowerCase();
     return {
+        id: d.id ?? null,
         time: d.timestamp ? new Date(d.timestamp).toLocaleString('en-IN', {
             timeZone: 'Asia/Kolkata',
             day: '2-digit', month: '2-digit', year: 'numeric',
@@ -60,6 +61,12 @@ function normalise(d) {
             hour12: false
         }) : '—',
         isoTime:  d.timestamp || '',
+        // IST calendar date (YYYY-MM-DD) — used to preselect the map's date picker
+        dateIST: d.timestamp
+            ? new Date(d.timestamp).toLocaleDateString('sv-SE', { timeZone: 'Asia/Kolkata' })
+            : '',
+        lat: (typeof d.lat === 'number' && d.lat !== 0) ? d.lat : null,
+        lng: (typeof d.lng === 'number' && d.lng !== 0) ? d.lng : null,
         location: d.distance_m > 0
             ? `KM ${Math.floor(d.distance_m / 1000)}+${String(d.distance_m % 1000).padStart(3,'0')}`
             : 'Stationary',
@@ -151,16 +158,19 @@ function pClassBadge(p) {
     return `<span class="pclass-badge" style="background:${map[p] || '#94a3b8'}">${p}</span>`;
 }
 
-function cardHTML(ev) {
+function cardHTML(ev, idx) {
     const newTag = ev.isNew ? '<span class="new-tag">NEW</span>' : '';
+    const hasGps = ev.lat != null && ev.lng != null;
     return `
-    <div class="event-card event-${ev.severity}${ev.isNew ? ' event-flash' : ''}">
+    <div class="event-card event-${ev.severity}${ev.isNew ? ' event-flash' : ''}${hasGps ? ' event-clickable' : ''}"
+        ${hasGps ? `onclick="goToMapEvent(${idx})" title="View on map"` : ''}>
         <div class="event-left">
             <div class="event-top-row">
                 ${newTag}
                 <span class="event-time">${ev.time}</span>
                 <span class="event-sensor">${ev.sensor}</span>
                 ${pClassBadge(ev.pClass)}
+                ${hasGps ? '<i class="fas fa-map-marked-alt event-map-hint" title="View on map"></i>' : ''}
             </div>
             <div class="event-bottom-row">
                 <span class="event-location"><i class="fas fa-map-marker-alt"></i> ${ev.location}</span>
@@ -177,6 +187,26 @@ function cardHTML(ev) {
     </div>`;
 }
 
+// ── Jump to peak on the map page ──────────────────────────────────────────
+function goToMapEvent(idx) {
+    const ev = filtered()[idx];
+    if (!ev || ev.lat == null || ev.lng == null) return;
+
+    const params = new URLSearchParams();
+    if (ev.id != null) params.set('eventId', ev.id);
+    params.set('lat', ev.lat);
+    params.set('lng', ev.lng);
+    if (ev.dateIST) params.set('date', ev.dateIST);
+
+    const target = `pages/map-content.html?${params.toString()}`;
+    if (window.parent && window.parent.loadPage) {
+        window.parent.loadPage(target);
+    } else {
+        window.location.href = target.replace('pages/', '');
+    }
+}
+window.goToMapEvent = goToMapEvent;
+
 function renderAll(flashDot = false) {
     const list = filtered();
     document.getElementById('totalEvents').textContent  = list.length;
@@ -184,7 +214,7 @@ function renderAll(flashDot = false) {
     document.getElementById('mediumEvents').textContent = list.filter(e => e.severity === 'medium').length;
     document.getElementById('lowEvents').textContent    = list.filter(e => e.severity === 'low').length;
     document.getElementById('eventsList').innerHTML =
-        list.length ? list.map(cardHTML).join('') : '<p class="empty">No events found.</p>';
+        list.length ? list.map((ev, i) => cardHTML(ev, i)).join('') : '<p class="empty">No events found.</p>';
 
     if (flashDot) {
         const dot = document.getElementById('liveDot');

@@ -3,6 +3,21 @@
 let map, trackLayer, markerLayer;
 let allEvents   = [];
 let trackPoints = [];
+let markerById  = {};
+
+// ── Focus request from Events page (?eventId=&lat=&lng=&date=) ────────────
+let pendingFocus = null;
+(function readFocusParams() {
+    const p = new URLSearchParams(window.location.search);
+    const lat = parseFloat(p.get('lat'));
+    const lng = parseFloat(p.get('lng'));
+    if (!isNaN(lat) && !isNaN(lng)) {
+        pendingFocus = {
+            eventId: p.get('eventId') != null ? Number(p.get('eventId')) : null,
+            lat, lng
+        };
+    }
+})();
 
 // ── Init ─────────────────────────────────────────────────────────────────
 function initMap() {
@@ -21,10 +36,11 @@ function initMap() {
     // Populate date picker with dates that have data
     loadAvailableDates();
 
-    // Default: load today's date or last 24h
+    // Default: load today's date, unless a specific event asked for a date
+    const urlDate = new URLSearchParams(window.location.search).get('date');
     const today = new Date().toISOString().slice(0, 10);
     const datePicker = document.getElementById('datePicker');
-    if (datePicker) datePicker.value = today;
+    if (datePicker) datePicker.value = urlDate || today;
 
     loadMapData();
 
@@ -65,7 +81,33 @@ async function loadMapData() {
     }
 
     renderAll();
+    applyPendingFocus();
     setStatus('');
+}
+
+// ── Jump to & open the marker requested by the Events page ────────────────
+function applyPendingFocus() {
+    if (!pendingFocus) return;
+    const focus = pendingFocus;
+    pendingFocus = null; // only ever apply once
+
+    let marker = focus.eventId != null ? markerById[focus.eventId] : null;
+
+    if (!marker) {
+        // Fall back to nearest marker by coordinates
+        let bestId = null, bestDist = Infinity;
+        allEvents.forEach(e => {
+            if (e.lat == null || e.lng == null) return;
+            const d = Math.hypot(e.lat - focus.lat, e.lng - focus.lng);
+            if (d < bestDist) { bestDist = d; bestId = e.id; }
+        });
+        if (bestId != null) marker = markerById[bestId];
+    }
+
+    if (marker) {
+        map.flyTo(marker.getLatLng(), 17);
+        setTimeout(() => marker.openPopup(), 400);
+    }
 }
 
 // ── Render ────────────────────────────────────────────────────────────────
@@ -91,6 +133,7 @@ function drawTrack() {
 }
 
 function drawMarkers() {
+    markerById = {};
     const severityFilter = document.getElementById('eventTypeFilter')?.value || 'all';
     const filtered = severityFilter === 'all'
         ? allEvents
@@ -139,6 +182,8 @@ function addMarker(event) {
             </table>
         </div>
     `);
+
+    if (event.id != null) markerById[event.id] = marker;
 }
 
 // ── Sidebar ───────────────────────────────────────────────────────────────

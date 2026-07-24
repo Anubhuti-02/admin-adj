@@ -67,6 +67,7 @@ let sensorDataPoints = 50;
 let currentDataIndex = 0;
 let latestLeft       = { x: 0, y: 0, z: 0, gForce: 0 };
 let latestRight      = { x: 0, y: 0, z: 0, gForce: 0 };
+let latestPivot      = { x: 0, y: 0, z: 0, gForce: 0 };
 
 startClock('currentTime', 'currentDate');
 
@@ -123,7 +124,7 @@ if (debugToggle) {
         debugMode = !debugMode;
         debugToggle.classList.toggle('active');
         setText('debugStatus', debugMode ? 'Debug ON' : 'Debug OFF');
-        ['debug1','debug2','debugLog'].forEach(id => {
+        ['debug1','debug2','debug3','debugLog'].forEach(id => {
             const el = $(id);
             if (el) el.style.display = debugMode ? 'block' : 'none';
         });
@@ -174,7 +175,7 @@ $('resetSessionBtn')?.addEventListener('click', () => {
 
 // ── Sensor chart ──────────────────────────────────────────────────────────
 function generateSensorData() {
-    return Array(sensorDataPoints).fill(0).map((_,i) => ({ time: i, accel1: 0, accel2: 0 }));
+    return Array(sensorDataPoints).fill(0).map((_,i) => ({ time: i, accel1: 0, accel2: 0, accel3: 0 }));
 }
 let sensorData = generateSensorData();
 const ctx = $('sensorChart')?.getContext('2d');
@@ -186,7 +187,8 @@ if (ctx) {
             labels: sensorData.map(d => d.time),
             datasets: [
                 { label: 'Left (S1)',  data: sensorData.map(d => d.accel1), borderColor: '#0891b2', backgroundColor: 'transparent', tension: 0.4, borderWidth: 2, pointRadius: 0 },
-                { label: 'Right (S2)', data: sensorData.map(d => d.accel2), borderColor: '#7c3aed', backgroundColor: 'transparent', tension: 0.4, borderWidth: 2, pointRadius: 0 }
+                { label: 'Right (S2)', data: sensorData.map(d => d.accel2), borderColor: '#7c3aed', backgroundColor: 'transparent', tension: 0.4, borderWidth: 2, pointRadius: 0 },
+                { label: 'Pivot (S3)', data: sensorData.map(d => d.accel3), borderColor: '#f97316', backgroundColor: 'transparent', tension: 0.4, borderWidth: 2, pointRadius: 0 }
             ]
         },
         options: {
@@ -219,16 +221,18 @@ function initializeSensorData() {
     chart.data.labels = sensorData.map(d => d.time);
     chart.data.datasets[0].data = sensorData.map(d => d.accel1);
     chart.data.datasets[1].data = sensorData.map(d => d.accel2);
+    chart.data.datasets[2].data = sensorData.map(d => d.accel3);
     chart.update();
 }
-function pushToChart(a1, a2) {
+function pushToChart(a1, a2, a3) {
     currentDataIndex++;
     sensorData.shift();
-    sensorData.push({ time: currentDataIndex, accel1: a1, accel2: a2 });
+    sensorData.push({ time: currentDataIndex, accel1: a1, accel2: a2, accel3: a3 });
     if (!chart) return;
     chart.data.labels = sensorData.map(d => d.time);
     chart.data.datasets[0].data = sensorData.map(d => d.accel1);
     chart.data.datasets[1].data = sensorData.map(d => d.accel2);
+    chart.data.datasets[2].data = sensorData.map(d => d.accel3);
     chart.update('none');
 }
 async function loadGValueHistory() {
@@ -249,12 +253,14 @@ async function loadGValueHistory() {
 
         const leftRows  = rows.filter(r => r.sensor === 'left');
         const rightRows = rows.filter(r => r.sensor === 'right');
-        const n = Math.max(leftRows.length, rightRows.length);
+        const pivotRows = rows.filter(r => r.sensor === 'pivot');
+        const n = Math.max(leftRows.length, rightRows.length, pivotRows.length);
 
         if (!chart) return;
         chart.data.labels = Array.from({ length: n }, (_, i) => i + 1);
         chart.data.datasets[0].data = leftRows.map(r => +(r.peak ?? 0));
         chart.data.datasets[1].data = rightRows.map(r => +(r.peak ?? 0));
+        chart.data.datasets[2].data = pivotRows.map(r => +(r.peak ?? 0));
         chart.options.plugins.title = { display: true, text: `G-Value History: ${fromEl._flatpickr?.altInput?.value || fromEl.value} → ${toEl._flatpickr?.altInput?.value || toEl.value}` };
         chart.update();
 
@@ -284,12 +290,13 @@ async function loadHistoricalChart() {
         currentDataIndex = 0;
         sensorData = generateSensorData();
         data.forEach((pt, i) => {
-            if (i < sensorDataPoints) sensorData[i] = { time: i, accel1: pt.accel1 || 0, accel2: pt.accel2 || 0 };
+            if (i < sensorDataPoints) sensorData[i] = { time: i, accel1: pt.accel1 || 0, accel2: pt.accel2 || 0, accel3: pt.accel3 || 0 };
         });
         if (!chart) return;
         chart.data.labels = sensorData.map(d => d.time);
         chart.data.datasets[0].data = sensorData.map(d => d.accel1);
         chart.data.datasets[1].data = sensorData.map(d => d.accel2);
+        chart.data.datasets[2].data = sensorData.map(d => d.accel3);
         chart.update();
     } catch (e) { console.warn('[operator] Historical chart load failed:', e.message); }
 }
@@ -309,20 +316,34 @@ function fillAccel(prefix, data) {
     setText(`${prefix}Window`, fmtInt(data.window));
 }
 
+// ── Freshness badges (LIVE/STALE) ──────────────────────────────────────────
+function setFreshBadge(sensor) {
+    const idMap = { left: 'freshBadge1', right: 'freshBadge2', pivot: 'freshBadge3' };
+    const el = document.getElementById(idMap[sensor]);
+    if (!el) return;
+    el.dataset.state = 'live';
+    el.textContent = 'LIVE';
+    clearTimeout(el._staleTimer);
+    el._staleTimer = setTimeout(() => {
+        el.dataset.state = 'stale';
+        el.textContent = 'STALE';
+    }, 15000);
+}
+
 // ── High-G alert ─────────────────────────────────────────────────────────
-const alertState = { left: null, right: null };
-let alertDismissTimers = { left: null, right: null };
+const alertState = { left: null, right: null, pivot: null };
+let alertDismissTimers = { left: null, right: null, pivot: null };
 function showHighGAlert(sensor, peakG) {
     alertState[sensor] = `${peakG.toFixed(2)}g on ${sensor.toUpperCase()} axle`;
     const banner = $('highGAlert');
     const msg = $('highGMsg');
     if (!banner || !msg) return;
-    msg.textContent = [alertState.left, alertState.right].filter(Boolean).join('   |   ');
+    msg.textContent = [alertState.left, alertState.right, alertState.pivot].filter(Boolean).join('   |   ');
     banner.style.display = 'flex';
     clearTimeout(alertDismissTimers[sensor]);
     alertDismissTimers[sensor] = setTimeout(() => {
         alertState[sensor] = null;
-        const remaining = [alertState.left, alertState.right].filter(Boolean);
+        const remaining = [alertState.left, alertState.right, alertState.pivot].filter(Boolean);
         if (remaining.length) msg.textContent = remaining.join('   |   ');
         else banner.style.display = 'none';
     }, 1000);
@@ -372,6 +393,7 @@ socket.on('connect_error', () => {
 const HEALTH_COMPONENTS = [
     { key: 'adxl345_s1', id: 'healthAccel1', label: 'Accel-1 (S1)' },
     { key: 'adxl345_s2', id: 'healthAccel2', label: 'Accel-2 (S2)' },
+    { key: 'adxl345_s3', id: 'healthAccel3', label: 'Accel-3 (Pivot)' },
     { key: 'w5500',       id: 'healthComm',  label: 'Comm (W5500)' },
     { key: 'phyLink',     id: 'healthPhy',   label: 'PHY Link' },
     { key: 'tcp',         id: 'healthTcp',   label: 'TCP' },
@@ -418,6 +440,7 @@ socket.on('system-health', (health) => {
 const previousWarningState = {
     left: true,      // assume initially online
     right: true,
+    pivot: true,
     gps: true,
     usart2: true,
     spi1: true,
@@ -428,7 +451,7 @@ const previousWarningState = {
 };
 
 // ── Last active timestamps and detailed communication ─────────────────────
-let lastLeftTime = null, lastRightTime = null, lastGpsTime = null;
+let lastLeftTime = null, lastRightTime = null, lastPivotTime = null, lastGpsTime = null;
 
 function formatLogTime(isoString) {
     if (!isoString) return '--';
@@ -453,14 +476,16 @@ function updateHardwareStatus() {
     if (!container) return;
 
     const now = Date.now();
-    const leftOnline = lastLeftTime && (now - new Date(lastLeftTime).getTime() < 15000);
+    const leftOnline  = lastLeftTime  && (now - new Date(lastLeftTime).getTime()  < 15000);
     const rightOnline = lastRightTime && (now - new Date(lastRightTime).getTime() < 15000);
-    const gpsOnline = lastGpsTime && (now - new Date(lastGpsTime).getTime() < 30000);
-    const anyOnline = leftOnline || rightOnline || gpsOnline;
+    const pivotOnline = lastPivotTime && (now - new Date(lastPivotTime).getTime() < 15000);
+    const gpsOnline   = lastGpsTime   && (now - new Date(lastGpsTime).getTime()   < 30000);
+    const anyOnline   = leftOnline || rightOnline || pivotOnline || gpsOnline;
 
     const currentTime = new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false });
-    const leftFail = healthStatus.adxl345_s1 === 'FAIL';
+    const leftFail  = healthStatus.adxl345_s1 === 'FAIL';
     const rightFail = healthStatus.adxl345_s2 === 'FAIL';
+    const pivotFail = healthStatus.adxl345_s3 === 'FAIL';
 
     const leftMsg = leftFail ? 'Accel-1 connection failed'
                   : leftOnline ? 'ACTIVE NOW'
@@ -468,6 +493,9 @@ function updateHardwareStatus() {
     const rightMsg = rightFail ? 'Accel-2 connection failed'
                    : rightOnline ? 'ACTIVE NOW'
                    : `OFFLINE, last active ${formatLogTime(lastRightTime)}`;
+    const pivotMsg = pivotFail ? 'Accel-3 (Pivot) connection failed'
+                   : pivotOnline ? 'ACTIVE NOW'
+                   : `OFFLINE, last active ${formatLogTime(lastPivotTime)}`;
     const gpsMsg = gpsOnline ? 'ACTIVE NOW' : `OFFLINE, last active ${formatLogTime(lastGpsTime)}`;
 
     const logEntries = [];
@@ -487,9 +515,10 @@ function updateHardwareStatus() {
         }
     }
 
-    addEntry(leftOnline ? 'info' : 'warning', leftMsg, '[Accel-1]', 'left');
+    addEntry(leftOnline  ? 'info' : 'warning', leftMsg,  '[Accel-1]', 'left');
     addEntry(rightOnline ? 'info' : 'warning', rightMsg, '[Accel-2]', 'right');
-    addEntry(gpsOnline ? 'info' : 'warning', gpsMsg, '[GPS]', 'gps');
+    addEntry(pivotOnline ? 'info' : 'warning', pivotMsg, '[Accel-3]', 'pivot');
+    addEntry(gpsOnline   ? 'info' : 'warning', gpsMsg,   '[GPS]', 'gps');
 
     if (anyOnline) {
         const healthMap = [
@@ -532,6 +561,7 @@ async function fetchLatestTimestamps() {
             const data = await sensorRes.json();
             if (data.left?.timestamp)  lastLeftTime  = data.left.timestamp;
             if (data.right?.timestamp) lastRightTime = data.right.timestamp;
+            if (data.pivot?.timestamp) lastPivotTime = data.pivot.timestamp;
         }
 
         if (gpsRes.ok) {
@@ -553,12 +583,15 @@ if (logContainer) {
 }
 fetchLatestTimestamps();
 
-// Socket updates for accelerometer data (updates timestamps)
+// ── Socket updates for accelerometer data (single, consolidated handler) ───
 socket.on('accelerometer-data', (data) => {
     if (!isLiveStreaming) return;
-    // ODR decimation gate
-    const _sid = data.sensor === 'left' ? 1 : data.sensor === 'right' ? 2 : null;
-    if (_sid && typeof AccelConfig !== 'undefined' && !AccelConfig.shouldAccept(_sid)) return;
+
+    // ODR decimation gate — includes pivot (sensor id 3)
+    const _sid = data.sensor === 'left' ? 1 : data.sensor === 'right' ? 2 : data.sensor === 'pivot' ? 3 : null;
+    if (_sid && typeof AccelConfig !== 'undefined' && typeof AccelConfig.shouldAccept === 'function') {
+        if (AccelConfig.shouldAccept(_sid) === false) return;
+    }
 
     // Update Last Data timestamp
     const now = new Date();
@@ -568,17 +601,27 @@ socket.on('accelerometer-data', (data) => {
         latestLeft = data;
         fillAccel('accel1', data);
         if (!lastLeftTime || data.timestamp > lastLeftTime) lastLeftTime = data.timestamp;
+        setFreshBadge('left');
     } else if (data.sensor === 'right') {
         latestRight = data;
         fillAccel('accel2', data);
         if (!lastRightTime || data.timestamp > lastRightTime) lastRightTime = data.timestamp;
+        setFreshBadge('right');
+    } else if (data.sensor === 'pivot') {
+        latestPivot = data;
+        fillAccel('accel3', data);
+        if (!lastPivotTime || data.timestamp > lastPivotTime) lastPivotTime = data.timestamp;
+        setFreshBadge('pivot');
     }
+
     const peak = data.peak ?? data.gForce ?? 0;
-    if (peak >= 8 && (data.sensor === 'left' || data.sensor === 'right')) showHighGAlert(data.sensor, peak);
+    if (peak >= 8 && ['left', 'right', 'pivot'].includes(data.sensor)) showHighGAlert(data.sensor, peak);
+
     // Use PEAK (max G within window) so spikes are visible, fall back to gForce
     pushToChart(
         latestLeft.peak  || latestLeft.gForce  || 0,
-        latestRight.peak || latestRight.gForce || 0
+        latestRight.peak || latestRight.gForce || 0,
+        latestPivot.peak || latestPivot.gForce || 0
     );
     updateHardwareStatus();
 });

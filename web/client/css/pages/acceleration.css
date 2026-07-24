@@ -151,3 +151,8 @@ body {
     .graph-controls { flex-wrap: wrap; }
     .metrics-bar { flex-direction: column; gap: 15px; align-items: flex-start; }
 }
+
+.color-pvvert { background: #f97316; }
+.color-pvlat  { background: #0ea5e9; }
+.dot-pvvert   { background: #f97316; }
+.dot-pvlat    { background: #0ea5e9; }

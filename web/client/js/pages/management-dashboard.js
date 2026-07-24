@@ -34,6 +34,16 @@ const sensorChart = new Chart(sensorCtx, {
                 borderWidth: 2,
                 pointRadius: 0,
                 spanGaps: true
+            },
+            {
+                label: 'Pivot',
+                data: [],
+                borderColor: '#f59e0b',
+                backgroundColor: 'transparent',
+                tension: 0.4,
+                borderWidth: 2,
+                pointRadius: 0,
+                spanGaps: true
             }
         ]
     },
@@ -207,13 +217,14 @@ async function fetchChartFromDB() {
                 if (!isStale) {
                     newLeft[start + i]  = pt.left;
                     newRight[start + i] = pt.right;
+                    newPivot[start + i] = pt.pivot;
                 } else {
                     // Show data up to last known, then null gap at the end
                     const ageMs = now - new Date(pt.ts).getTime();
                     if (ageMs > STALE_CUTOFF_MS) {
                         newLeft[start + i]  = pt.left;
                         newRight[start + i] = pt.right;
-                    }
+                        newPivot[start + i] = pt.pivot;                    }
                     // points within the stale gap stay null → line drops off
                 }
             });
@@ -222,6 +233,7 @@ async function fetchChartFromDB() {
         sensorChart.data.labels           = newLabels;
         sensorChart.data.datasets[0].data = newLeft;
         sensorChart.data.datasets[1].data = newRight;
+        sensorChart.data.datasets[2].data = newPivot;
         sensorChart.update('none');
     } catch (e) { console.error('chart DB fetch error:', e); }
 }

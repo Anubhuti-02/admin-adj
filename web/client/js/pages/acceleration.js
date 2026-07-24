@@ -24,7 +24,9 @@ const channels = [
     { key: 'lv', name: 'AB-L-VERT', color: '#22c55e', legendId: 'legend1', metricId: 'metric1' },
     { key: 'll', name: 'AB-L-LAT',  color: '#eab308', legendId: 'legend2', metricId: 'metric2' },
     { key: 'rv', name: 'AB-R-VERT', color: '#ef4444', legendId: 'legend3', metricId: 'metric3' },
-    { key: 'rl', name: 'AB-R-LAT',  color: '#8b5cf6', legendId: 'legend4', metricId: 'metric4' }
+    { key: 'rl', name: 'AB-R-LAT',  color: '#8b5cf6', legendId: 'legend4', metricId: 'metric4' },
+    { key: 'pv', name: 'PV-VERT',   color: '#f97316', legendId: 'legend5', metricId: 'metric5' },
+    { key: 'pl', name: 'PV-LAT',    color: '#0ea5e9', legendId: 'legend6', metricId: 'metric6' }
 ];
 
 const ctx = document.getElementById('mainChart').getContext('2d');

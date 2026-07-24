@@ -61,59 +61,85 @@
                 <div class="legend-item"><div class="legend-color" style="background:#eab308"></div><span>AB-L-LAT</span><span class="legend-value" id="distVal2">— g</span></div>
                 <div class="legend-item"><div class="legend-color" style="background:#ef4444"></div><span>AB-R-VERT</span><span class="legend-value" id="distVal3">— g</span></div>
                 <div class="legend-item"><div class="legend-color" style="background:#8b5cf6"></div><span>AB-R-LAT</span><span class="legend-value" id="distVal4">— g</span></div>
+                <div class="legend-item"><div class="legend-color" style="background:#f97316"></div><span>AB-P-VERT</span><span class="legend-value" id="distVal5">— g</span></div>
+                <div class="legend-item"><div class="legend-color" style="background:#0ea5e9"></div><span>AB-P-LAT</span><span class="legend-value" id="distVal6">— g</span></div>
             </div>
         </div>
 
-        <!-- Raw Values Grid -->
-        <div class="graph-grid">
-            <!-- Left S1 -->
-            <div class="graph-card">
-                <div class="graph-header">
-                    <h2><i class="fas fa-microchip"></i> Accelerometer 1 — Raw Values (Left S1)</h2>
-                    <span id="raw1RefreshTime" style="font-size:0.95rem;color:#0ea5e9;font-weight:700;">🕐 —</span>
-                </div>
-                <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;">
-                    <span style="width:28px;font-size:0.7rem;font-weight:700;color:#ef4444;text-align:right;">X</span>
-                    <div style="flex:1;height:80px;position:relative;"><canvas id="raw1X_chart"></canvas></div>
-                    <span id="raw1X" style="width:52px;font-size:0.72rem;font-weight:600;color:#ef4444;">— g</span>
-                </div>
-                <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;">
-                    <span style="width:28px;font-size:0.7rem;font-weight:700;color:#22c55e;text-align:right;">Y</span>
-                    <div style="flex:1;height:80px;position:relative;"><canvas id="raw1Y_chart"></canvas></div>
-                    <span id="raw1Y" style="width:52px;font-size:0.72rem;font-weight:600;color:#22c55e;">— g</span>
-                </div>
-                <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
-                    <span style="width:28px;font-size:0.7rem;font-weight:700;color:#3b82f6;text-align:right;">Z</span>
-                    <div style="flex:1;height:80px;position:relative;"><canvas id="raw1Z_chart"></canvas></div>
-                    <span id="raw1Z" style="width:52px;font-size:0.72rem;font-weight:600;color:#3b82f6;">— g</span>
-                </div>
-                <div style="text-align:center;font-size:0.72rem;color:#94a3b8;padding-left:34px;">← Time (seconds) →</div>
-            </div>
-
-            <!-- Right S2 -->
-            <div class="graph-card">
-                <div class="graph-header">
-                    <h2><i class="fas fa-microchip"></i> Accelerometer 2 — Raw Values (Right S2)</h2>
-                    <span id="raw2RefreshTime" style="font-size:0.95rem;color:#0ea5e9;font-weight:700;">🕐 —</span>
-                </div>
-                <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;">
-                    <span style="width:28px;font-size:0.7rem;font-weight:700;color:#ef4444;text-align:right;">X</span>
-                    <div style="flex:1;height:80px;position:relative;"><canvas id="raw2X_chart"></canvas></div>
-                    <span id="raw2X" style="width:52px;font-size:0.72rem;font-weight:600;color:#ef4444;">— g</span>
-                </div>
-                <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;">
-                    <span style="width:28px;font-size:0.7rem;font-weight:700;color:#22c55e;text-align:right;">Y</span>
-                    <div style="flex:1;height:80px;position:relative;"><canvas id="raw2Y_chart"></canvas></div>
-                    <span id="raw2Y" style="width:52px;font-size:0.72rem;font-weight:600;color:#22c55e;">— g</span>
-                </div>
-                <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
-                    <span style="width:28px;font-size:0.7rem;font-weight:700;color:#3b82f6;text-align:right;">Z</span>
-                    <div style="flex:1;height:80px;position:relative;"><canvas id="raw2Z_chart"></canvas></div>
-                    <span id="raw2Z" style="width:52px;font-size:0.72rem;font-weight:600;color:#3b82f6;">— g</span>
-                </div>
-                <div style="text-align:center;font-size:0.72rem;color:#94a3b8;padding-left:34px;">← Time (seconds) →</div>
-            </div>
+       <!-- Raw Values Grid — all three side by side -->
+<div class="graph-grid-3">
+    <!-- Left S1 -->
+    <div class="graph-card">
+        <div class="graph-header">
+            <h2><i class="fas fa-microchip"></i> Accelerometer 1 — Raw Values (Left S1)</h2>
+            <span id="raw1RefreshTime" style="font-size:0.85rem;color:#0ea5e9;font-weight:700;">🕐 —</span>
         </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;">
+            <span style="width:24px;font-size:0.68rem;font-weight:700;color:#ef4444;text-align:right;">X</span>
+            <div style="flex:1;height:70px;position:relative;"><canvas id="raw1X_chart"></canvas></div>
+            <span id="raw1X" style="width:50px;font-size:0.68rem;font-weight:600;color:#ef4444;">— g</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;">
+            <span style="width:24px;font-size:0.68rem;font-weight:700;color:#22c55e;text-align:right;">Y</span>
+            <div style="flex:1;height:70px;position:relative;"><canvas id="raw1Y_chart"></canvas></div>
+            <span id="raw1Y" style="width:50px;font-size:0.68rem;font-weight:600;color:#22c55e;">— g</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+            <span style="width:24px;font-size:0.68rem;font-weight:700;color:#3b82f6;text-align:right;">Z</span>
+            <div style="flex:1;height:70px;position:relative;"><canvas id="raw1Z_chart"></canvas></div>
+            <span id="raw1Z" style="width:50px;font-size:0.68rem;font-weight:600;color:#3b82f6;">— g</span>
+        </div>
+        <div style="text-align:center;font-size:0.68rem;color:#94a3b8;padding-left:30px;">← Time (s) →</div>
+    </div>
+
+    <!-- Right S2 -->
+    <div class="graph-card">
+        <div class="graph-header">
+            <h2><i class="fas fa-microchip"></i> Accelerometer 2 — Raw Values (Right S2)</h2>
+            <span id="raw2RefreshTime" style="font-size:0.85rem;color:#0ea5e9;font-weight:700;">🕐 —</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;">
+            <span style="width:24px;font-size:0.68rem;font-weight:700;color:#ef4444;text-align:right;">X</span>
+            <div style="flex:1;height:70px;position:relative;"><canvas id="raw2X_chart"></canvas></div>
+            <span id="raw2X" style="width:50px;font-size:0.68rem;font-weight:600;color:#ef4444;">— g</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;">
+            <span style="width:24px;font-size:0.68rem;font-weight:700;color:#22c55e;text-align:right;">Y</span>
+            <div style="flex:1;height:70px;position:relative;"><canvas id="raw2Y_chart"></canvas></div>
+            <span id="raw2Y" style="width:50px;font-size:0.68rem;font-weight:600;color:#22c55e;">— g</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+            <span style="width:24px;font-size:0.68rem;font-weight:700;color:#3b82f6;text-align:right;">Z</span>
+            <div style="flex:1;height:70px;position:relative;"><canvas id="raw2Z_chart"></canvas></div>
+            <span id="raw2Z" style="width:50px;font-size:0.68rem;font-weight:600;color:#3b82f6;">— g</span>
+        </div>
+        <div style="text-align:center;font-size:0.68rem;color:#94a3b8;padding-left:30px;">← Time (s) →</div>
+    </div>
+
+    <!-- Pivot S3 -->
+    <div class="graph-card">
+        <div class="graph-header">
+            <h2><i class="fas fa-microchip"></i> Accelerometer 3 — Raw Values (Pivot S3)</h2>
+            <span id="raw3RefreshTime" style="font-size:0.85rem;color:#0ea5e9;font-weight:700;">🕐 —</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;">
+            <span style="width:24px;font-size:0.68rem;font-weight:700;color:#ef4444;text-align:right;">X</span>
+            <div style="flex:1;height:70px;position:relative;"><canvas id="raw3X_chart"></canvas></div>
+            <span id="raw3X" style="width:50px;font-size:0.68rem;font-weight:600;color:#ef4444;">— g</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:2px;">
+            <span style="width:24px;font-size:0.68rem;font-weight:700;color:#22c55e;text-align:right;">Y</span>
+            <div style="flex:1;height:70px;position:relative;"><canvas id="raw3Y_chart"></canvas></div>
+            <span id="raw3Y" style="width:50px;font-size:0.68rem;font-weight:600;color:#22c55e;">— g</span>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px;">
+            <span style="width:24px;font-size:0.68rem;font-weight:700;color:#3b82f6;text-align:right;">Z</span>
+            <div style="flex:1;height:70px;position:relative;"><canvas id="raw3Z_chart"></canvas></div>
+            <span id="raw3Z" style="width:50px;font-size:0.68rem;font-weight:600;color:#3b82f6;">— g</span>
+        </div>
+        <div style="text-align:center;font-size:0.68rem;color:#94a3b8;padding-left:30px;">← Time (s) →</div>
+    </div>
+</div>
 
         <!-- Ride Comfort Index -->
         <div class="graph-card full-width" style="margin-top: 24px;">

@@ -22,7 +22,7 @@ async function preloadSensorReadings() {
         const res  = await fetch(`${PRELOAD_SERVER}/api/latest/sensor`);
         const data = await res.json(); // { left: {...}, right: {...} }
 
-        const sides = { left: data.left, right: data.right };
+        const sides = { left: data.left, right: data.right, pivot: data.pivot };
 
         for (const [side, d] of Object.entries(sides)) {
             if (!d) continue;
@@ -40,9 +40,15 @@ async function preloadSensorReadings() {
                 _set('abrVert', vert.toFixed(4) + ' g');
                 _set('abrLat',  lat.toFixed(4)  + ' g');
             }
+            if (side === 'pivot') {
+                const vert = Math.abs(d.z ?? 0);
+                const lat  = Math.sqrt((d.x??0)**2 + (d.y??0)**2);
+                _set('abpVert', vert.toFixed(4) + ' g');
+                _set('abpLat',  lat.toFixed(4)  + ' g');
+            }
 
             // Operator dashboard raw values
-            const pfx = side === 'left' ? 'accel1' : 'accel2';
+            const pfx = side === 'left' ? 'accel1' : side === 'right' ? 'accel2' : 'accel3';
             _set(pfx + 'X',      _fmt4(d.x));
             _set(pfx + 'Y',      _fmt4(d.y));
             _set(pfx + 'Z',      _fmt4(d.z));
@@ -57,7 +63,7 @@ async function preloadSensorReadings() {
             _set(pfx + 'Window', _fmtInt(d.window));
 
             // Graphs page legend values
-            const gpfx = side === 'left' ? 'raw1' : 'raw2';
+            const gpfx = side === 'left' ? 'raw1' : side === 'right' ? 'raw2' : 'raw3';
             _set(gpfx + 'X', _fmt4(d.x));
             _set(gpfx + 'Y', _fmt4(d.y));
             _set(gpfx + 'Z', _fmt4(d.z));

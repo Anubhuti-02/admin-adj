@@ -191,8 +191,8 @@ body {
 }
 
 /* Table specific min-widths */
-.blocks-table table       { min-width: 1200px; }
-.peak-dist-table table    { min-width: 620px; margin: 0 auto; }
+.blocks-table table       { min-width: 1650px; }
+.peak-dist-table table    { min-width: 920px; margin: 0 auto; }
 .worst-peaks-table table  { min-width: 100%; width: 100%; table-layout: auto; }
 
 /* General table styling */

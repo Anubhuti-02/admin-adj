@@ -16,6 +16,7 @@ const API = window.location.origin;
 
 let allEvents  = [];
 let filterVal  = 'all';
+let sensorFilterVal = 'all';
 let lastIsoTime = '';
 
 // Read history range from URL params (set by parent index.js)
@@ -149,7 +150,9 @@ async function fetchEvents() {
 
 // ── Render ────────────────────────────────────────────────────────────────
 function filtered() {
-    return filterVal === 'all' ? allEvents : allEvents.filter(e => e.severity === filterVal);
+    let list = filterVal === 'all' ? allEvents : allEvents.filter(e => e.severity === filterVal);
+    if (sensorFilterVal !== 'all') list = list.filter(e => e.sensor === sensorFilterVal);
+    return list;
 }
 
 function pClassBadge(p) {
@@ -225,6 +228,11 @@ function renderAll(flashDot = false) {
 // ── Filter ────────────────────────────────────────────────────────────────
 document.getElementById('severityFilter').addEventListener('change', e => {
     filterVal = e.target.value;
+    renderAll();
+});
+
+document.getElementById('sensorFilter')?.addEventListener('change', e => {
+    sensorFilterVal = e.target.value;
     renderAll();
 });
 

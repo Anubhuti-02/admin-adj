@@ -51,6 +51,9 @@ h1 { font-size: 2.5rem; color: #1e293b; margin-bottom: 8px; font-weight: 700; }
 
 .priority-card:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(0,0,0,0.1); }
 
+/* ── Pivot accent — visually distinguishes the pivot bar from axle ───────── */
+.pivot-grid .priority-card { border-left: 4px solid #f59e0b; }
+
 .priority-header { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
 
 .priority-icon {
@@ -105,10 +108,10 @@ h1 { font-size: 2.5rem; color: #1e293b; margin-bottom: 8px; font-weight: 700; }
 
 .threshold-range span { font-weight: 600; color: #22c55e; }
 
-/* Peak limits section */
+/* Peak / Axis limits section */
 .peak-limits-section { background: #f8fafc; border-radius: 16px; padding: 24px; margin-bottom: 30px; }
 
-.peak-limits-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+.peak-limits-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 8px; }
 .peak-limits-header h3 { font-size: 1.1rem; color: #1e293b; }
 
 .limits-container { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 20px; }
@@ -152,6 +155,26 @@ h1 { font-size: 2.5rem; color: #1e293b; margin-bottom: 8px; font-weight: 700; }
 }
 
 .add-limit input:focus { border-color: #22c55e; outline: none; }
+
+/* ── Axis limit groups (X / Y / Z) ────────────────────────────────────────── */
+.axis-limit-group { margin-bottom: 22px; }
+.axis-limit-group:last-child { margin-bottom: 0; }
+
+.axis-limit-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 700;
+    font-size: 0.95rem;
+    margin-bottom: 10px;
+}
+.axis-limit-label.axis-x { color: #ef4444; }
+.axis-limit-label.axis-y { color: #22c55e; }
+.axis-limit-label.axis-z { color: #3b82f6; }
+.axis-limit-label i { font-size: 0.85rem; }
+
+.axis-limit-group .limit-tag { border-color: #e2e8f0; }
+.axis-limit-group.axis-x .limit-tag { border-color: #fecaca; }
 
 /* Buttons */
 .btn {
@@ -234,4 +257,8 @@ h1 { font-size: 2.5rem; color: #1e293b; margin-bottom: 8px; font-weight: 700; }
     border: 1px solid #bbf7d0;
     color: #166534;
     font-weight: 500;
+}
+
+@media (max-width: 900px) {
+    .priority-grid { grid-template-columns: 1fr; }
 }

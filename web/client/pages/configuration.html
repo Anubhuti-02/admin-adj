@@ -92,22 +92,121 @@
                 </div>
             </div>
 
-            <!-- Peak Limits Section -->
+
+            <!-- Pivot Priority Thresholds Section -->
+            <div class="threshold-section">
+                <div class="section-title">
+                    <i class="fas fa-crosshairs"></i>
+                    <h2>Pivot Priority Thresholds</h2>
+                </div>
+                <p style="color:#64748b;font-size:0.9rem;margin:-14px 0 20px;">
+                    The pivot axle typically sees lower peak accelerations than the left/right axles —
+                    configure its own thresholds here so pivot impacts aren't classified against axle-tuned limits.
+                </p>
+
+                <div class="priority-grid pivot-grid">
+                    <!-- Pivot P1 -->
+                    <div class="priority-card">
+                        <div class="priority-header">
+                            <div class="priority-icon p1-icon">P1</div>
+                            <h3>Medium Priority</h3>
+                        </div>
+                        <p class="priority-desc">Moderate pivot impacts requiring monitoring</p>
+                        <div class="threshold-input">
+                            <label>Min Threshold (g)</label>
+                            <input type="number" id="pv-p1Min" step="0.1" min="0">
+                        </div>
+                        <div class="threshold-input">
+                            <label>Max Threshold (g)</label>
+                            <input type="number" id="pv-p1Max" step="0.1" min="0">
+                        </div>
+                        <div class="threshold-range">Range: <span id="pv-p1Range">—</span></div>
+                    </div>
+
+                    <!-- Pivot P2 -->
+                    <div class="priority-card">
+                        <div class="priority-header">
+                            <div class="priority-icon p2-icon">P2</div>
+                            <h3>High Priority</h3>
+                        </div>
+                        <p class="priority-desc">Significant pivot impacts requiring attention</p>
+                        <div class="threshold-input">
+                            <label>Min Threshold (g)</label>
+                            <input type="number" id="pv-p2Min" step="0.1" min="0">
+                        </div>
+                        <div class="threshold-input">
+                            <label>Max Threshold (g)</label>
+                            <input type="number" id="pv-p2Max" step="0.1" min="0">
+                        </div>
+                        <div class="threshold-range">Range: <span id="pv-p2Range">—</span></div>
+                    </div>
+
+                    <!-- Pivot P3 -->
+                    <div class="priority-card">
+                        <div class="priority-header">
+                            <div class="priority-icon p3-icon">P3</div>
+                            <h3>Critical Priority</h3>
+                        </div>
+                        <p class="priority-desc">Severe pivot impacts requiring immediate action</p>
+                        <div class="threshold-input">
+                            <label>Min Threshold (g)</label>
+                            <input type="number" id="pv-p3Min" step="0.1" min="0">
+                        </div>
+                        <div class="threshold-input">
+                            <label>Max Threshold (g)</label>
+                            <input type="text" value="∞" disabled>
+                        </div>
+                        <div class="threshold-range">Range: <span id="pv-p3Range">—</span></div>
+                    </div>
+                </div>
+
+                <div class="current-config" id="pivotCurrentConfig" style="margin-top:10px;">
+                    <h4><i class="fas fa-check-circle"></i> Pivot Active Configuration</h4>
+                    <div class="config-badges" id="pivotConfigBadges"></div>
+                </div>
+            </div>
+
+            <!-- Axis Limits Section (X / Y / Z) — separate per-axis peak limit lists -->
             <div class="peak-limits-section">
                 <div class="peak-limits-header">
-                    <h3><i class="fas fa-chart-line" style="color: #22c55e; margin-right: 8px;"></i>Peak Limit Values</h3>
-                    <span style="color: #64748b; font-size: 0.9rem;">Configure available peak limits for classification</span>
+                    <h3><i class="fas fa-chart-line" style="color: #22c55e; margin-right: 8px;"></i>Axis Limit Values</h3>
+                    <span style="color: #64748b; font-size: 0.9rem;">Configure available peak limits per axis for classification</span>
                 </div>
 
-                <div class="limits-container" id="limitsContainer">
-                    <!-- Populated by JavaScript -->
+                <!-- X axis -->
+                <div class="axis-limit-group axis-x">
+                    <div class="axis-limit-label axis-x"><i class="fas fa-arrows-alt-h"></i> X-Axis Limits</div>
+                    <div class="limits-container" id="limitsContainerX"></div>
+                    <div class="add-limit">
+                        <input type="number" id="newLimitX" placeholder="Enter new X-axis limit (e.g., 15)" step="0.1" min="0">
+                        <button class="btn btn-secondary" onclick="addAxisLimit('x')">
+                            <i class="fas fa-plus"></i> Add
+                        </button>
+                    </div>
                 </div>
 
-                <div class="add-limit">
-                    <input type="number" id="newLimit" placeholder="Enter new peak limit (e.g., 15)" step="0.1" min="0">
-                    <button class="btn btn-secondary" onclick="addPeakLimit()">
-                        <i class="fas fa-plus"></i> Add Limit
-                    </button>
+                <!-- Y axis -->
+                <div class="axis-limit-group axis-y">
+                    <div class="axis-limit-label axis-y"><i class="fas fa-arrows-alt-v"></i> Y-Axis Limits</div>
+                    <div class="limits-container" id="limitsContainerY"></div>
+                    <div class="add-limit">
+                        <input type="number" id="newLimitY" placeholder="Enter new Y-axis limit (e.g., 15)" step="0.1" min="0">
+                        <button class="btn btn-secondary" onclick="addAxisLimit('y')">
+                            <i class="fas fa-plus"></i> Add
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Z axis -->
+                <div class="axis-limit-group axis-z">
+                    <div class="axis-limit-label axis-z"><i class="fas fa-arrow-up"></i> Z-Axis Limits</div>
+                    <div class="limits-container" id="limitsContainerZ"></div>
+                    <div class="add-limit">
+                        <input type="number" id="newLimitZ" placeholder="Enter new Z-axis limit (e.g., 15)" step="0.1" min="0">
+                        <button class="btn btn-secondary" onclick="addAxisLimit('z')">
+                            <i class="fas fa-plus"></i> Add
+                        </button>
+                    </div>
                 </div>
             </div>
 

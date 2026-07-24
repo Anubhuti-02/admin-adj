@@ -63,6 +63,7 @@ function avg(arr) {
 function computeBlock(docs, blkIdx) {
     const left  = docs.filter(d => d.device_id === 'left');
     const right = docs.filter(d => d.device_id === 'right');
+    const pivot = docs.filter(d => d.device_id === 'pivot');
     const pick  = (arr, f) => arr.map(d => d[f]).filter(v => v != null);
     return {
         label: `BLK${blkIdx + 1}`,
@@ -78,6 +79,12 @@ function computeBlock(docs, blkIdx) {
             sdV:  avg(pick(right, 'sdV')),
             sdL:  avg(pick(right, 'sdL')),
         },
+        pivot: {
+            rmsV: avg(pick(pivot, 'rmsV')),
+            rmsL: avg(pick(pivot, 'rmsL')),
+            sdV:  avg(pick(pivot, 'sdV')),
+            sdL:  avg(pick(pivot, 'sdL')),
+        }
     };
 }
 
@@ -96,20 +103,20 @@ async function loadLimitsConfig() {
 // Returns { p1, p2, p3 } thresholds for a given side+axis from LC config.
 // Falls back to hardcoded values if not configured.
 function getLCPeakThresholds(side, axis) {
-    const accelKey = side === 'right' ? 'accel2' : 'accel1';
+   const accelKey = side === 'right' ? 'accel2' : side === 'pivot' ? 'accel3' : 'accel1';
     const axisKey  = axis === 'V'     ? 'vert'   : 'lat';
     const lc = limitsConfig?.limitClass?.[accelKey]?.[axisKey]?.peak;
     if (lc?.p1 != null && lc?.p2 != null && lc?.p3 != null) return lc;
-    // Fallback to original hardcoded thresholds
     return { p1: 5, p2: 10, p3: 20 };
 }
-
 
 
 function computePeakDist(docs) {
     const out = {
         left:  { V: { P1:0, P2:0, P3:0 }, L: { P1:0, P2:0, P3:0 } },
         right: { V: { P1:0, P2:0, P3:0 }, L: { P1:0, P2:0, P3:0 } },
+        pivot: { V: { P1:0, P2:0, P3:0 }, L: { P1:0, P2:0, P3:0 } }
+        
     };
     // Classify a value against { p1, p2, p3 } thresholds from LC config (or fallback)
     const getPClass = (g, thresholds) => {
@@ -121,7 +128,7 @@ function computePeakDist(docs) {
         return null;
     };
     for (const d of docs) {
-        const side = d.device_id === 'right' ? 'right' : 'left';
+        const side = d.device_id === 'right' ? 'right' : (d.device_id === 'pivot' ? 'pivot' : 'left');
         const pV = getPClass(d.z_axis, getLCPeakThresholds(side, 'V'));
         const pL = getPClass(d.x_axis, getLCPeakThresholds(side, 'L'));
         if (pV) out[side].V[pV]++;
@@ -131,17 +138,20 @@ function computePeakDist(docs) {
 }
 
 function computeWorstPeaks(docs) {
-    const b = { 'L-LAT': [], 'L-VERT': [], 'R-LAT': [], 'R-VERT': [] };
+    const b = { 'L-LAT': [], 'L-VERT': [], 'R-LAT': [], 'R-VERT': [], 'P-LAT': [], 'P-VERT': [] };
     for (const d of docs) {
-        const side = d.device_id === 'right' ? 'right' : 'left';
+        const side = d.device_id === 'right' ? 'right' : (d.device_id === 'pivot' ? 'pivot' : 'left');
         const vert = d.z_axis != null ? Math.abs(d.z_axis) : null;
         const lat  = d.x_axis != null ? Math.abs(d.x_axis) : null;
         if (side === 'left') {
             if (vert != null) b['L-VERT'].push(vert);
             if (lat != null)  b['L-LAT'].push(lat);
-        } else {
+        } else if (side === 'right') {
             if (vert != null) b['R-VERT'].push(vert);
             if (lat != null)  b['R-LAT'].push(lat);
+        } else if (side === 'pivot') {
+            if (vert != null) b['P-VERT'].push(vert);
+            if (lat != null)  b['P-LAT'].push(lat);
         }
     }
     const top10 = arr => arr.sort((a,b)=>b-a).slice(0,10).map(v=>+v.toFixed(1));
@@ -150,6 +160,8 @@ function computeWorstPeaks(docs) {
         'L-VERT': top10(b['L-VERT']),
         'R-LAT':  top10(b['R-LAT']),
         'R-VERT': top10(b['R-VERT']),
+        'P-LAT':  top10(b['P-LAT']),
+        'P-VERT': top10(b['P-VERT']),
     };
 }
 
@@ -167,7 +179,7 @@ function buildCard(docs, kmIndex, hwLive) {
             blocks.push({ label: `BLK${b+1}`, pending: true });
         } else {
             const empty = { rmsV: null, rmsL: null, sdV: null, sdL: null };
-            blocks.push({ label: `BLK${b+1}`, left: empty, right: empty });
+            blocks.push({ label: `BLK${b+1}`, left: empty, right: empty, pivot: empty });
         }
     }
     return {
@@ -192,7 +204,7 @@ function renderBlocksTable(blocks) {
                 <td colspan="8" style="color:#94a3b8;font-style:italic;font-size:11px">Collecting…</td>
             </tr>`;
         }
-        const l = blk.left || {}, r = blk.right || {};
+        const l = blk.left || {}, r = blk.right || {}, p = blk.pivot || {};
         return `<tr>
             <td>${blk.label}</td>
             <td class="${rmsClass(l.rmsV)}">${fmt(l.rmsV)}</td>
@@ -203,13 +215,17 @@ function renderBlocksTable(blocks) {
             <td class="${rmsClass(r.rmsL)}">${fmt(r.rmsL)}</td>
             <td class="sd-value">${fmt(r.sdV,3)}</td>
             <td class="sd-value">${fmt(r.sdL,3)}</td>
+            <td class="${rmsClass(p.rmsV)}">${fmt(p.rmsV)}</td>
+            <td class="${rmsClass(p.rmsL)}">${fmt(p.rmsL)}</td>
+            <td class="sd-value">${fmt(p.sdV,3)}</td>
+            <td class="sd-value">${fmt(p.sdL,3)}</td>
         </tr>`;
     }).join('');
     return `<div class="table-container">
         <table>
             <thead>
-                <tr><th rowspan="3">LOC</th><th colspan="4">LEFT</th><th colspan="4">RIGHT</th></tr>
-                <tr><th colspan="2">RMS</th><th colspan="2">SD</th><th colspan="2">RMS</th><th colspan="2">SD</th></tr>
+                <tr><th rowspan="3">LOC</th><th colspan="4">LEFT</th><th colspan="4">RIGHT</th><th colspan="4">PIVOT</th></tr>
+                <tr><th colspan="2">RMS</th><th colspan="2">SD</th><th colspan="2">RMS</th><th colspan="2">SD</th><th colspan="2">RMS</th><th colspan="2">SD</th></tr>
                 <tr><th>V</th><th>L</th><th>V</th><th>L</th><th>V</th><th>L</th><th>V</th><th>L</th></tr>
             </thead>
             <tbody>${rows}</tbody>
@@ -219,7 +235,7 @@ function renderBlocksTable(blocks) {
 
 function renderPeakDistTable(peakDist) {
     if (!peakDist) return '<p class="no-data">No distribution data yet.</p>';
-    const l = peakDist.left, r = peakDist.right;
+    const l = peakDist.left, r = peakDist.right, p = peakDist.pivot || { V:{}, L:{} };
 
     // Show which thresholds are driving the classification
     const lcConfigured = limitsConfig?.limitClass != null;
@@ -249,13 +265,15 @@ function renderPeakDistTable(peakDist) {
             <td class="count-badge count-${cls}" title="${tip('left','L')}">${l.L[band]||0}</td>
             <td class="count-badge count-${cls}" title="${tip('right','V')}">${r.V[band]||0}</td>
             <td class="count-badge count-${cls}" title="${tip('right','L')}">${r.L[band]||0}</td>
+            <td class="count-badge count-${cls}" title="${tip('pivot','V')}">${p.V[band]||0}</td>
+            <td class="count-badge count-${cls}" title="${tip('pivot','L')}">${p.L[band]||0}</td>
         </tr>`;
     };
     return `<div class="table-container">
         ${thresholdNote}
         <table>
-            <thead><tr><th rowspan="2">BANDS</th><th colspan="2">LEFT</th><th colspan="2">RIGHT</th></tr>
-            <tr><th>V</th><th>L</th><th>V</th><th>L</th></tr></thead>
+            <thead><tr><th rowspan="2">BANDS</th><th colspan="2">LEFT</th><th colspan="2">RIGHT</th><th colspan="2">PIVOT</th></tr>
+            <tr><th>V</th><th>L</th><th>V</th><th>L</th><th>V</th><th>L</th></tr></thead>
             <tbody>${bandRow('P1')}${bandRow('P2')}${bandRow('P3')}</tbody>
         </table>
     </div>`;
@@ -264,7 +282,7 @@ function renderPeakDistTable(peakDist) {
 function renderWorstPeaksTable(worstPeaks) {
     if (!worstPeaks) return '<p class="no-data">No peak data yet.</p>';
 
-    const params = ['L-LAT', 'L-VERT', 'R-LAT', 'R-VERT'];
+    const params = ['L-LAT', 'L-VERT', 'R-LAT', 'R-VERT', 'P-LAT', 'P-VERT'];
 
     const rows = params.map(param => {
         const vals = worstPeaks[param] || [];
@@ -562,12 +580,13 @@ function generateFullDayCSV(docsForDay, reportDate) {
 
         // BLOCKS
         rows.push("BLOCKS SUMMARY");
-        rows.push("LOC,Left RMS V,Left RMS L,Left SD V,Left SD L,Right RMS V,Right RMS L,Right SD V,Right SD L");
+        rows.push("LOC,Left RMS V,Left RMS L,Left SD V,Left SD L,Right RMS V,Right RMS L,Right SD V,Right SD L,Pivot RMS V,Pivot RMS L,Pivot SD V,Pivot SD L");
 
         card.blocks.forEach(blk => {
             if (blk.pending) return;
             const l = blk.left || {};
             const r = blk.right || {};
+            const p = blk.pivot || {};
             rows.push([
                 blk.label,
                 fmt(l.rmsV) || '—',
@@ -577,23 +596,29 @@ function generateFullDayCSV(docsForDay, reportDate) {
                 fmt(r.rmsV) || '—',
                 fmt(r.rmsL) || '—',
                 fmt(r.sdV, 3) || '—',
-                fmt(r.sdL, 3) || '—'
+                fmt(r.sdL, 3) || '—',
+                fmt(p.rmsV) || '—',
+                fmt(p.rmsL) || '—',
+                fmt(p.sdV, 3) || '—',
+                fmt(p.sdL, 3) || '—'
             ].join(','));
         });
         rows.push("");
 
         // PEAK DISTRIBUTION
         rows.push("PEAK DISTRIBUTION");
-        rows.push("Band,Left Vertical (V),Left Lateral (L),Right Vertical (V),Right Lateral (L)");
+        rows.push("Band,Left Vertical (V),Left Lateral (L),Right Vertical (V),Right Lateral (L),Pivot Vertical (V),Pivot Lateral (L)");
 
-        const pd = card.peakDist || { left: { V: {}, L: {} }, right: { V: {}, L: {} } };
+        const pd = card.peakDist || { left: { V: {}, L: {} }, right: { V: {}, L: {} }, pivot: { V: {}, L: {} } };
         ['P1','P2','P3'].forEach(band => {
             rows.push([
                 band,
                 pd.left.V[band] || 0,
                 pd.left.L[band] || 0,
                 pd.right.V[band] || 0,
-                pd.right.L[band] || 0
+                pd.right.L[band] || 0,
+                pd.pivot.V[band] || 0,
+                pd.pivot.L[band] || 0
             ].join(','));
         });
         rows.push("");
@@ -603,7 +628,7 @@ function generateFullDayCSV(docsForDay, reportDate) {
         rows.push("Parameter,1,2,3,4,5,6,7,8,9,10");
 
         const wp = card.worstPeaks || {};
-        ['L-LAT','L-VERT','R-LAT','R-VERT'].forEach(param => {
+        ['L-LAT','L-VERT','R-LAT','R-VERT','P-LAT','P-VERT'].forEach(param => {
             const vals = (wp[param] || []).map(v => fmt(v,1));
             while (vals.length < 10) vals.push('—');
             rows.push([param, ...vals].join(','));

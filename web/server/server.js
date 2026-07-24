@@ -10,52 +10,113 @@ const os        = require('os');
 const { DateTime } = require("luxon");
 const net           = require('net');
 
-// ── Timezone configuration (change as needed) ─────────────────────────────
+// ── Timezone configuration ─────────────────────────────────────────────────
 const TIMEZONE = "Asia/Kolkata";
-
 function getTimezoneTimestamp() {
-return DateTime.now().setZone(TIMEZONE).toFormat("yyyy-MM-dd'T'HH:mm:ss.SSS");
+    return DateTime.now().setZone(TIMEZONE).toFormat("yyyy-MM-dd'T'HH:mm:ss.SSS");
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// ── SENSOR REGISTRY — single source of truth for every accelerometer ──────
+// To add a new accelerometer in future: add one entry here, assign it an
+// unused packetType byte, and everything else (DB inserts, health tracking,
+// MQTT topics, ODR config, REST endpoints) picks it up automatically.
+// ═════════════════════════════════════════════════════════════════════════
+const SENSORS = [
+    {
+        id:          'left',                 // device_id / sensor column value in DB
+        label:       'Left (S1)',
+        packetType:  0x01,                   // binary MQTT packet type byte
+        healthKey:   'adxl345_s1',            // key inside system-health payload
+        odrKey:      'accel1',                // key inside odrConfig
+        mqttTopic:   'adj/datalogger/sensors/left',
+        topicMatch:  t => t.includes('left'), // for legacy text-protocol topic routing
+    },
+    {
+        id:          'right',
+        label:       'Right (S2)',
+        packetType:  0x02,
+        healthKey:   'adxl345_s2',
+        odrKey:      'accel2',
+        mqttTopic:   'adj/datalogger/sensors/right',
+        topicMatch:  t => t.includes('right'),
+    },
+    {
+        id:          'pivot',
+        label:       'Pivot (S3)',
+        packetType:  0x04,                   // 0x03 is reserved for the EVENT packet type
+        healthKey:   'adxl345_s3',
+        odrKey:      'accel3',
+        mqttTopic:   'adj/datalogger/sensors/pivot',
+        topicMatch:  t => t.includes('pivot'),
+    },
+    // ── To add a 4th sensor in the future, uncomment/copy this block: ──────
+    // {
+    //     id:          'aux',
+    //     label:       'Auxiliary (S4)',
+    //     packetType:  0x05,
+    //     healthKey:   'adxl345_s4',
+    //     odrKey:      'accel4',
+    //     mqttTopic:   'adj/datalogger/sensors/aux',
+    //     topicMatch:  t => t.includes('aux'),
+    // },
+];
+
+const SENSOR_IDS = SENSORS.map(s => s.id);                                   // ['left','right','pivot']
+const sensorById  = id => SENSORS.find(s => s.id === id);
+const sensorByPacketType = pt => SENSORS.find(s => s.packetType === pt);
+
+// Default ODR config, generated from the registry (all default to 100 Hz)
+const odrConfig = {};
+SENSORS.forEach(s => { odrConfig[s.odrKey] = 100; });
+
+// Sensor liveness + ODR decimation counters, keyed by sensor id
+const sensorLastSeen = {};
+const odrCounters    = {};
+SENSORS.forEach(s => { sensorLastSeen[s.id] = 0; odrCounters[s.id] = 0; });
+
+const SENSOR_TIMEOUT_MS = 10000; // 10s — mark FAIL if no packet in this window
+
+function shouldEmit(sensorId) {
+    const s = sensorById(sensorId);
+    if (!s) return true;
+    const odr    = odrConfig[s.odrKey] || 200;
+    const factor = Math.round(200 / odr);
+    odrCounters[sensorId] = (odrCounters[sensorId] + 1) % factor;
+    return odrCounters[sensorId] === 0;
 }
 
 // ── Persistent JSON fallback ──────────────────────────────────────────────
-const PEAKS_LOG_FILE    = path.join(__dirname, 'peaks_log.json');
+const PEAKS_LOG_FILE     = path.join(__dirname, 'peaks_log.json');
 const LIMITS_CONFIG_FILE = path.join(__dirname, 'limits_config.json');
 
 function getLocalIP() {
     const interfaces = os.networkInterfaces();
     for (const iface of Object.values(interfaces)) {
         for (const addr of iface) {
-            if (addr.family === 'IPv4' && !addr.internal) {
-                return addr.address;
-            }
+            if (addr.family === 'IPv4' && !addr.internal) return addr.address;
         }
     }
     return '127.0.0.1';
 }
-
 const LOCAL_IP = getLocalIP();
 
 function loadPeaksLog() {
     try {
-        if (fs.existsSync(PEAKS_LOG_FILE))
-            return JSON.parse(fs.readFileSync(PEAKS_LOG_FILE, 'utf8'));
+        if (fs.existsSync(PEAKS_LOG_FILE)) return JSON.parse(fs.readFileSync(PEAKS_LOG_FILE, 'utf8'));
     } catch (e) { console.error('peaks_log.json read error:', e.message); }
     return [];
 }
-
-
 function savePeaksLog(log) {
     try { fs.writeFileSync(PEAKS_LOG_FILE, JSON.stringify(log, null, 2)); }
     catch (e) { console.error('peaks_log.json write error:', e.message); }
 }
-
 let peaksLog = loadPeaksLog();
 console.log(`Loaded ${peaksLog.length} existing impact records from JSON fallback`);
 
 function loadLimitsConfig() {
     try {
-        if (fs.existsSync(LIMITS_CONFIG_FILE))
-            return JSON.parse(fs.readFileSync(LIMITS_CONFIG_FILE, 'utf8'));
+        if (fs.existsSync(LIMITS_CONFIG_FILE)) return JSON.parse(fs.readFileSync(LIMITS_CONFIG_FILE, 'utf8'));
     } catch (e) { console.error('limits_config.json read error:', e.message); }
     return { uml: null, limitClass: null };
 }
@@ -63,11 +124,10 @@ function saveLimitsConfig(cfg) {
     try { fs.writeFileSync(LIMITS_CONFIG_FILE, JSON.stringify(cfg, null, 2)); }
     catch (e) { console.error('limits_config.json write error:', e.message); }
 }
-
 let limitsConfig = loadLimitsConfig();
 console.log('[limits] Config loaded:', JSON.stringify(limitsConfig));
 
-// ── Express / Socket.IO ───────────────────────────────────────────────────
+// ── Express / Socket.IO / Postgres ─────────────────────────────────────────
 const { Pool } = require('pg');
 const pool = new Pool({
     host:     process.env.PG_HOST     || 'localhost',
@@ -86,6 +146,8 @@ app.use(express.json());
 app.use(express.static(path.join(__dirname, '../client')));
 
 // ── PostgreSQL schema init ────────────────────────────────────────────────
+// NOTE: sensor/device_id columns are TEXT — no schema change needed to add
+// new sensors. Just add them to SENSORS[] above.
 let pgReady = false;
 
 async function initDB() {
@@ -132,7 +194,9 @@ async function initDB() {
         await pool.query(`
             CREATE INDEX IF NOT EXISTS idx_ae_timestamp   ON accelerometer_events(timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_ae_ts_sev      ON accelerometer_events(timestamp DESC, severity);
+            CREATE INDEX IF NOT EXISTS idx_ae_sensor      ON accelerometer_events(sensor, timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_md_timestamp   ON monitoring_data(timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_md_device      ON monitoring_data(device_id, timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_rd_timestamp   ON realtime_data(timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_rd_sensor_ts   ON realtime_data(sensor, timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_gps_timestamp  ON rm_gps(timestamp DESC);
@@ -145,7 +209,7 @@ async function initDB() {
 }
 initDB();
 
-// ── Row → camelCase normaliser (keeps frontend contracts unchanged) ────────
+// ── Row → camelCase normaliser ──────────────────────────────────────────
 function normImpact(r) {
     return {
         timestamp:  r.timestamp, sensor: r.sensor, severity: r.severity,
@@ -171,13 +235,11 @@ function normMonitoring(r) {
     };
 }
 
-// ── DB clock anchor — returns latest timestamp in realtime_data ──────────
+// ── DB clock anchor ─────────────────────────────────────────────────────
 let _dbLatestTs = null;
 async function getDBNow() {
     try {
-        const r = await pool.query(
-            'SELECT timestamp FROM realtime_data ORDER BY timestamp DESC LIMIT 1'
-        );
+        const r = await pool.query('SELECT timestamp FROM realtime_data ORDER BY timestamp DESC LIMIT 1');
         if (r.rows.length) {
             let dbTs = new Date(r.rows[0].timestamp);
             if (peaksLog && peaksLog.length) {
@@ -196,91 +258,95 @@ let lastDataTimestamp = null;
 let mqttConnected     = false;
 const mqttClient = mqtt.connect(`mqtt://${process.env.MQTT_HOST}:${process.env.MQTT_PORT}`);
 
-// ── ODR decimation — server-side emit gating ──────────────────────────────
-// Hardware always publishes at 200 Hz. odrConfig controls how many of those
-// messages are forwarded to all Socket.IO clients.
-//   200 Hz → factor 1 → every message emitted
-//   100 Hz → factor 2 → 1 of every 2 messages emitted
-//    50 Hz → factor 4 → 1 of every 4 messages emitted
-let odrConfig   = { accel1: 100, accel2: 100 };
-const odrCounters = { accel1: 0, accel2: 0 };
-
-// Track last packet time per sensor to detect offline sensors
-const sensorLastSeen = { s1: 0, s2: 0 };
-const SENSOR_TIMEOUT_MS = 10000; // 10 s — mark FAIL if no packet in this window
-
-function shouldEmit(sensorKey) {
-    const odr    = odrConfig[sensorKey] || 200;
-    const factor = Math.round(200 / odr);
-    odrCounters[sensorKey] = (odrCounters[sensorKey] + 1) % factor;
-    return odrCounters[sensorKey] === 0;
-}
-
-// ── Health parser ─────────────────────────────────────────────────────────
-// TODO: Details of peripherals to be fetched from controller encoded in msg.
+// ── Health parser (legacy text protocol) ───────────────────────────────────
 function parseHealthMessage(msgStr) {
     const get = pattern => {
         const m = msgStr.match(pattern);
         if (!m) return 'UNKNOWN';
         return m[1].trim().toUpperCase() === 'OK' ? 'OK' : 'FAIL';
     };
-    return {
-        usart2:     get(/USART2\s*:\s*(OK|FAIL)/i),
-        spi1:       get(/SPI1\s*:\s*(OK|FAIL)/i),
-        adxl345_s1: get(/ADXL345\s+S1\s*:\s*(OK|FAIL)/i),
-        adxl345_s2: get(/ADXL345\s+S2\s*:\s*(OK|FAIL)/i),
-        w5500:      get(/W5500\s*:\s*(OK|FAIL)/i),
-        phyLink:    get(/PHY\s*Link\s*:\s*(OK|FAIL)/i),
-        tcp:        get(/TCP\s*:\s*(OK|FAIL)/i),
-        timestamp:  new Date().toISOString(),
-        raw:        msgStr.trim()
+    const health = {
+        usart2:  get(/USART2\s*:\s*(OK|FAIL)/i),
+        spi1:    get(/SPI1\s*:\s*(OK|FAIL)/i),
+        w5500:   get(/W5500\s*:\s*(OK|FAIL)/i),
+        phyLink: get(/PHY\s*Link\s*:\s*(OK|FAIL)/i),
+        tcp:     get(/TCP\s*:\s*(OK|FAIL)/i),
+        timestamp: new Date().toISOString(),
+        raw: msgStr.trim()
     };
+    // Generic per-sensor health parse: "ADXL345 S1: OK", "ADXL345 PIVOT: OK", etc.
+    SENSORS.forEach(s => {
+        const re = new RegExp(`ADXL345\\s+${s.id}\\s*:\\s*(OK|FAIL)`, 'i');
+        health[s.healthKey] = get(re);
+    });
+    return health;
 }
 
-// ── Stats helper — single source of truth ────────────────────────────────
-// Used by both REST and socket broadcasts
-// Tries CouchDB first (authoritative), falls back to peaksLog JSON
-// ── P-class thresholds — persisted to file so they survive restarts ───────
+// ═════════════════════════════════════════════════════════════════════════
+// ── P-class thresholds (persisted) ─────────────────────────────────────────
+// Axle (left/right) thresholds — unchanged file/shape/endpoints so every
+// existing consumer (events.js, acceleration-analysis.js, operator-dashboard.js,
+// acceleration-km.js LC thresholds) keeps working exactly as before.
+// ═════════════════════════════════════════════════════════════════════════
 const THRESHOLDS_FILE = path.join(__dirname, 'thresholds.json');
-
 function loadThresholds() {
     try {
-        if (fs.existsSync(THRESHOLDS_FILE))
-            return JSON.parse(fs.readFileSync(THRESHOLDS_FILE, 'utf8'));
+        if (fs.existsSync(THRESHOLDS_FILE)) return JSON.parse(fs.readFileSync(THRESHOLDS_FILE, 'utf8'));
     } catch (e) { console.error('thresholds.json read error:', e.message); }
     return { p1Min: 5, p1Max: 10, p2Min: 10, p2Max: 20, p3Min: 20 };
 }
-
 function saveThresholds(t) {
     try { fs.writeFileSync(THRESHOLDS_FILE, JSON.stringify(t, null, 2)); }
     catch (e) { console.error('thresholds.json write error:', e.message); }
 }
-
 let pClassThresholds = loadThresholds();
 console.log('[thresholds] Loaded:', pClassThresholds);
 
-function getPClass(peakG) {
-    if (peakG == null) return null;
-    const g = +peakG;
-    if (g >= pClassThresholds.p3Min)                                    return 'P3';
-    if (g >= pClassThresholds.p2Min && g < pClassThresholds.p2Max)      return 'P2';
-    if (g >= pClassThresholds.p1Min && g < pClassThresholds.p1Max)      return 'P1';
-    return null;
+// ★ PIVOT CHANGE — separate threshold set + file for the pivot sensor, since
+// pivot sees fewer/smaller peaks than the axle sensors and needs its own bands.
+const PIVOT_THRESHOLDS_FILE = path.join(__dirname, 'thresholds_pivot.json');
+function loadPivotThresholds() {
+    try {
+        if (fs.existsSync(PIVOT_THRESHOLDS_FILE)) return JSON.parse(fs.readFileSync(PIVOT_THRESHOLDS_FILE, 'utf8'));
+    } catch (e) { console.error('thresholds_pivot.json read error:', e.message); }
+    return { p1Min: 2, p1Max: 4, p2Min: 4, p2Max: 8, p3Min: 8 };
+}
+function savePivotThresholds(t) {
+    try { fs.writeFileSync(PIVOT_THRESHOLDS_FILE, JSON.stringify(t, null, 2)); }
+    catch (e) { console.error('thresholds_pivot.json write error:', e.message); }
+}
+let pivotClassThresholds = loadPivotThresholds();
+console.log('[thresholds] Pivot loaded:', pivotClassThresholds);
+
+// ★ PIVOT CHANGE — picks the right threshold set for a given sensor id
+function thresholdsFor(sensorId) {
+    return sensorId === 'pivot' ? pivotClassThresholds : pClassThresholds;
 }
 
-// Severity follows the configured P-class thresholds: P3→HIGH, P2→MEDIUM, P1→LOW
-function getSeverity(peakG) {
-    const pc = getPClass(peakG);
+// ★ PIVOT CHANGE — getPClass/getSeverity now take sensorId so pivot impacts
+// are classified against pivotClassThresholds instead of the axle bands.
+// Call sites that don't care about sensor (none should remain) still work
+// since thresholdsFor(undefined) falls back to the axle set.
+function getPClass(peakG, sensorId) {
+    if (peakG == null) return null;
+    const t = thresholdsFor(sensorId);
+    const g = +peakG;
+    if (g >= t.p3Min)                           return 'P3';
+    if (g >= t.p2Min && g < t.p2Max)            return 'P2';
+    if (g >= t.p1Min && g < t.p1Max)            return 'P1';
+    return null;
+}
+function getSeverity(peakG, sensorId) {
+    const pc = getPClass(peakG, sensorId);
     if (pc === 'P3') return 'HIGH';
     if (pc === 'P2') return 'MEDIUM';
     if (pc === 'P1') return 'LOW';
     return 'LOW';
 }
 
-// GET /api/thresholds
+// ── Axle threshold endpoints (unchanged shape/paths) ───────────────────────
 app.get('/api/thresholds', (req, res) => res.json(pClassThresholds));
 
-// POST /api/thresholds  body: { p1Min, p1Max, p2Min, p2Max, p3Min }
 app.post('/api/thresholds', (req, res) => {
     const { p1Min, p1Max, p2Min, p2Max, p3Min } = req.body;
     if ([p1Min, p1Max, p2Min, p2Max, p3Min].some(v => v == null || isNaN(v)))
@@ -288,26 +354,51 @@ app.post('/api/thresholds', (req, res) => {
     pClassThresholds = { p1Min: +p1Min, p1Max: +p1Max, p2Min: +p2Min, p2Max: +p2Max, p3Min: +p3Min };
     saveThresholds(pClassThresholds);
     console.log('[thresholds] Updated and saved:', pClassThresholds);
-    // Broadcast to all connected clients so dashboards update live
     io.emit('thresholds-updated', pClassThresholds);
     res.json({ success: true, thresholds: pClassThresholds });
 });
 
-// ── Last health status (kept in memory, served via /api/latest/health) ───
+app.delete('/api/thresholds', (req, res) => {
+    pClassThresholds = { p1Min: 5, p1Max: 10, p2Min: 10, p2Max: 20, p3Min: 20 };
+    saveThresholds(pClassThresholds);
+    console.log('[thresholds] Reset to default:', pClassThresholds);
+    io.emit('thresholds-updated', pClassThresholds);
+    res.json({ success: true, thresholds: pClassThresholds });
+});
+
+// ★ PIVOT CHANGE — pivot threshold endpoints, mirror the axle ones above
+app.get('/api/thresholds/pivot', (req, res) => res.json(pivotClassThresholds));
+
+app.post('/api/thresholds/pivot', (req, res) => {
+    const { p1Min, p1Max, p2Min, p2Max, p3Min } = req.body;
+    if ([p1Min, p1Max, p2Min, p2Max, p3Min].some(v => v == null || isNaN(v)))
+        return res.status(400).json({ error: 'All pivot threshold values required' });
+    pivotClassThresholds = { p1Min: +p1Min, p1Max: +p1Max, p2Min: +p2Min, p2Max: +p2Max, p3Min: +p3Min };
+    savePivotThresholds(pivotClassThresholds);
+    console.log('[thresholds] Pivot updated and saved:', pivotClassThresholds);
+    io.emit('pivot-thresholds-updated', pivotClassThresholds);
+    res.json({ success: true, thresholds: pivotClassThresholds });
+});
+
+app.delete('/api/thresholds/pivot', (req, res) => {
+    pivotClassThresholds = { p1Min: 2, p1Max: 4, p2Min: 4, p2Max: 8, p3Min: 8 };
+    savePivotThresholds(pivotClassThresholds);
+    console.log('[thresholds] Pivot reset to default:', pivotClassThresholds);
+    io.emit('pivot-thresholds-updated', pivotClassThresholds);
+    res.json({ success: true, thresholds: pivotClassThresholds });
+});
+
+// ── Last health status ───────────────────────────────────────────────────
 let lastHealthStatus = null;
 
-
-// Increments when GPS data arrives with a new coordinate
-// 0 when system is static
 let totalDistanceM = 0;
-let lastGpsCoord   = null; // { lat, lng } — used to calculate delta distance
+let lastGpsCoord   = null;
 
 // ── computeStats ──────────────────────────────────────────────────────────
 async function computeStats(hours = 24) {
     const dbNow  = await getDBNow();
     const cutoff = new Date(dbNow.getTime() - hours * 3600000).toISOString();
 
-    // ── PostgreSQL path ───────────────────────────────────────────────────
     if (pgReady) {
         try {
             const agg = await pool.query(`
@@ -339,7 +430,9 @@ async function computeStats(hours = 24) {
                 maxPeak:           parseFloat(row.max_peak),
                 avgPeak:           parseFloat(row.avg_peak),
                 lastPeak:          lastDoc ? (lastDoc.peak_g || 0) : 0,
-                lastPeakClass:     lastDoc ? (lastDoc.p_class || getPClass(lastDoc.peak_g) || '—') : '—',
+                // ★ PIVOT CHANGE — pass lastDoc.sensor so a pivot last-peak is
+                // classified against pivotClassThresholds, not the axle bands
+                lastPeakClass:     lastDoc ? (lastDoc.p_class || getPClass(lastDoc.peak_g, lastDoc.sensor) || '—') : '—',
                 lastPeakTimestamp: lastDoc ? lastDoc.timestamp : null,
                 lastPeakSensor:    lastDoc ? lastDoc.sensor    : null,
                 totalDistanceM,
@@ -352,7 +445,6 @@ async function computeStats(hours = 24) {
         }
     }
 
-    // ── JSON fallback ─────────────────────────────────────────────────────
     const recent  = peaksLog
         .filter(p => p.timestamp >= cutoff)
         .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
@@ -366,7 +458,8 @@ async function computeStats(hours = 24) {
         maxPeak:            peaks.length ? Math.max(...peaks) : 0,
         avgPeak:            peaks.length ? peaks.reduce((a,b) => a+b,0) / peaks.length : 0,
         lastPeak:           lastDoc ? (lastDoc.peak_g || 0) : 0,
-        lastPeakClass:      lastDoc ? (getPClass(lastDoc.peak_g) || '—') : '—',
+        // ★ PIVOT CHANGE — same sensor-aware fix for the JSON fallback path
+        lastPeakClass:      lastDoc ? (getPClass(lastDoc.peak_g, lastDoc.sensor) || '—') : '—',
         lastPeakTimestamp:  lastDoc ? lastDoc.timestamp : null,
         lastPeakSensor:     lastDoc ? lastDoc.sensor    : null,
         totalDistanceM,
@@ -376,34 +469,33 @@ async function computeStats(hours = 24) {
     return stats;
 }
 
-// ── API endpoints ─────────────────────────────────────────────────────────
 app.get('/api/impacts/stats', async (req, res) => {
     try {
         const hours = parseInt(req.query.hours) || 24;
-        const stats = await computeStats(hours);
-        res.json(stats);
+        res.json(await computeStats(hours));
     } catch (e) {
         console.error('/api/impacts/stats error:', e);
         res.status(500).json({ error: e.message });
     }
 });
 
-// ── GET /api/latest/sensor ────────────────────────────────────────────────
+// ── GET /api/latest/sensor — now generic over all registered sensors ──────
 app.get('/api/latest/sensor', async (req, res) => {
     try {
-        const result = { left: null, right: null };
+        const result = {};
+        SENSOR_IDS.forEach(id => { result[id] = null; });
 
         if (pgReady) {
-            for (const side of ['left', 'right']) {
+            for (const id of SENSOR_IDS) {
                 const r = await pool.query(`
                     SELECT * FROM monitoring_data
                     WHERE device_id = $1
                     ORDER BY timestamp DESC LIMIT 1
-                `, [side]);
+                `, [id]);
                 if (r.rows.length) {
                     const d = r.rows[0];
-                    result[side] = {
-                        sensor: side,
+                    result[id] = {
+                        sensor: id,
                         x: d.x_axis ?? 0, y: d.y_axis ?? 0, z: d.z_axis ?? 0,
                         rmsV: d.rms_v, rmsL: d.rms_l,
                         sdV:  d.sd_v,  sdL:  d.sd_l,
@@ -416,11 +508,11 @@ app.get('/api/latest/sensor', async (req, res) => {
             }
         }
 
-        // Fallback: use peaksLog
-        if (!result.left || !result.right) {
+        // Fallback: use peaksLog for any sensor still null
+        if (SENSOR_IDS.some(id => !result[id])) {
             const sorted = [...peaksLog].sort((a,b) => b.timestamp.localeCompare(a.timestamp));
             for (const p of sorted) {
-                if ((p.sensor === 'left' || p.sensor === 'right') && !result[p.sensor]) {
+                if (SENSOR_IDS.includes(p.sensor) && !result[p.sensor]) {
                     result[p.sensor] = {
                         sensor: p.sensor, x: p.x ?? 0, y: p.y ?? 0, z: p.z ?? 0,
                         rmsV: p.rmsV, rmsL: p.rmsL, sdV: p.sdV, sdL: p.sdL,
@@ -428,7 +520,7 @@ app.get('/api/latest/sensor', async (req, res) => {
                         gForce: p.gForce, timestamp: p.timestamp
                     };
                 }
-                if (result.left && result.right) break;
+                if (SENSOR_IDS.every(id => result[id])) break;
             }
         }
 
@@ -439,12 +531,7 @@ app.get('/api/latest/sensor', async (req, res) => {
     }
 });
 
-// ── GET /api/latest/health ────────────────────────────────────────────────
-// Returns the most recent system health status (stored in memory from MQTT)
-// On server restart we have no history, so returns null if never received
-app.get('/api/latest/health', (req, res) => {
-    res.json(lastHealthStatus);
-});
+app.get('/api/latest/health', (req, res) => res.json(lastHealthStatus));
 
 // ── GET /api/history/sensor ───────────────────────────────────────────────
 app.get('/api/history/sensor', async (req, res) => {
@@ -474,12 +561,13 @@ app.get('/api/history/sensor', async (req, res) => {
     res.json([]);
 });
 
-// GET /api/history/distance-chart?from=ISO&to=ISO&limit=5000
-// Returns paired left/right sensor history for the Acceleration vs Distance chart.
-// Supports explicit from/to ISO timestamps OR hours= fallback.
+// ── GET /api/history/distance-chart — generic, returns one array per sensor
 app.get('/api/history/distance-chart', async (req, res) => {
     try {
-        if (!pgReady) return res.json({ left: [], right: [] });
+        if (!pgReady) {
+            const empty = {}; SENSOR_IDS.forEach(id => empty[id] = []);
+            return res.json(empty);
+        }
 
         const limit = Math.min(parseInt(req.query.limit) || 5000, 10000);
         let startTime, endTime;
@@ -500,11 +588,12 @@ app.get('/api/history/distance-chart', async (req, res) => {
             WHERE timestamp >= $1 AND timestamp <= $2
             ORDER BY timestamp ASC
             LIMIT $3
-        `, [startTime, endTime, limit * 2]);
+        `, [startTime, endTime, limit * SENSOR_IDS.length]);
 
-        const left  = r.rows.filter(d => d.sensor === 'left');
-        const right = r.rows.filter(d => d.sensor === 'right');
-        res.json({ left, right });
+        const grouped = {};
+        SENSOR_IDS.forEach(id => { grouped[id] = r.rows.filter(d => d.sensor === id); });
+        // Also include 'left'/'right' aliases for legacy frontend compatibility
+        res.json(grouped);
     } catch (e) {
         console.error('/api/history/distance-chart error:', e.message);
         res.status(500).json({ error: e.message });
@@ -514,8 +603,6 @@ app.get('/api/history/distance-chart', async (req, res) => {
 app.get('/api/impacts', async (req, res) => {
     try {
         const { from, to, hours } = req.query;
-
-        // Build WHERE clause — prefer explicit from/to, fall back to hours
         let where = '', params = [];
         if (from && to) {
             where = 'WHERE timestamp >= $1 AND timestamp <= $2';
@@ -534,16 +621,12 @@ app.get('/api/impacts', async (req, res) => {
                 ${where}
                 ORDER BY timestamp DESC LIMIT 2000
             `, params);
-            // Always return DB result when a date filter was applied — even if empty.
-            // Without this guard, 0 DB rows would fall through to the fallback and
-            // return unfiltered data.
             if (where || r.rows.length) return res.json(r.rows.map(normImpact));
         }
     } catch (e) {
         console.error('/api/impacts error:', e.message);
     }
 
-    // Fallback to JSON log (only reached when DB is unavailable and no date filter)
     let fallback = [...peaksLog].sort((a, b) => b.timestamp.localeCompare(a.timestamp));
     if (from) fallback = fallback.filter(p => p.timestamp >= new Date(from).toISOString());
     if (to)   fallback = fallback.filter(p => p.timestamp <= new Date(to).toISOString());
@@ -554,7 +637,6 @@ app.get('/api/impacts', async (req, res) => {
     res.json(fallback.slice(0, 2000));
 });
 
-// GET /api/history/g-value?from=ISO&to=ISO — peak g per sensor for operator dashboard
 app.get('/api/history/g-value', async (req, res) => {
     try {
         if (!pgReady) return res.json([]);
@@ -580,22 +662,26 @@ app.get('/api/historical/graph/:hours', async (req, res) => {
         const dbNow     = await getDBNow();
         const timeLimit = new Date(dbNow.getTime() - hours * 3600000).toISOString();
         const r = await pool.query(`
-            SELECT x_axis, y_axis, z_axis, timestamp,
+            SELECT device_id, x_axis, y_axis, z_axis, timestamp,
                    rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l
             FROM monitoring_data
             WHERE timestamp >= $1
-            ORDER BY timestamp ASC LIMIT 2000
+            ORDER BY timestamp ASC LIMIT 6000
         `, [timeLimit]);
-        res.json(r.rows.map((doc, i) => ({
-            distance:  i * 100,
-            accel1:    doc.x_axis  || 0,
-            accel2:    doc.y_axis  || 0,
-            magnitude: doc.z_axis  || 0,
-            timestamp: doc.timestamp,
-            rmsV: doc.rms_v, rmsL: doc.rms_l,
-            sdV:  doc.sd_v,  sdL:  doc.sd_l,
-            p2pV: doc.p2p_v, p2pL: doc.p2p_l
-        })));
+
+        // Bucket by second, one column per registered sensor (accel1/accel2/accel3/...)
+        const buckets = {};
+        r.rows.forEach(doc => {
+            const sec = new Date(doc.timestamp).toISOString().slice(0, 19);
+            if (!buckets[sec]) {
+                buckets[sec] = { timestamp: doc.timestamp };
+                SENSORS.forEach((s, i) => { buckets[sec][`accel${i + 1}`] = null; });
+            }
+            const idx = SENSOR_IDS.indexOf(doc.device_id);
+            if (idx !== -1) buckets[sec][`accel${idx + 1}`] = doc.x_axis || 0;
+        });
+
+        res.json(Object.values(buckets).sort((a, b) => a.timestamp.localeCompare(b.timestamp)));
     } catch (e) {
         console.error('/api/historical/graph error:', e);
         res.status(500).json({ error: e.message });
@@ -611,57 +697,8 @@ app.get('/api/realtime/status', (req, res) => {
     });
 });
 
-// GET /api/realtime/impacts
-// Returns recent real-time data directly from the realtime_data database
-app.get('/api/realtime/impacts', async (req, res) => {
-    try {
-        const minutes = parseInt(req.query.minutes) || 1;
-        const cutoffTime = new Date(Date.now() - minutes * 60000).toISOString();
-        
-        if (realtimeDataDB) {
-            const response = await realtimeDataDB.find({
-                selector: { timestamp: { $gte: cutoffTime } },
-                sort: [{ timestamp: 'desc' }],
-                limit: 500
-            });
-            
-            const impacts = response.docs.map(doc => ({
-                timestamp: doc.timestamp,
-                sensor: doc.sensor,
-                peak_g: doc.peak || doc.gForce || 0,
-                peak: doc.peak,
-                gForce: doc.gForce || 0,
-                x: doc.x || 0,
-                y: doc.y || 0,
-                z: doc.z || 0,
-                rmsV: doc.rmsV,
-                rmsL: doc.rmsL,
-                sdV: doc.sdV,
-                sdL: doc.sdL,
-                p2pV: doc.p2pV,
-                p2pL: doc.p2pL,
-                distance_m: doc.distance_m || totalDistanceM || 0,
-                source: 'realtime'
-            }));
-            
-            console.log('[/api/realtime/impacts] Returned', impacts.length, 'readings');
-            return res.json(impacts);
-        }
-        
-        res.json([]);
-    } catch (e) {
-        console.error('[/api/realtime/impacts] Error:', e.message);
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// GET /api/monitoring/peaks
-// Returns monitoring_data docs with peak/gForce above a threshold (default 5g)
-// (removed monitoring peaks endpoint — restored to previous server state)
-
 // ── Management Dashboard APIs ─────────────────────────────────────────────
 
-// GET /api/management/sensor-chart?hours=24
 app.get('/api/management/sensor-chart', async (req, res) => {
     const hours = Math.min(parseInt(req.query.hours) || 24, 168);
     try {
@@ -693,13 +730,19 @@ app.get('/api/management/sensor-chart', async (req, res) => {
     }
 });
 
-// GET /api/acceleration/channels?minutes=2
+// ── GET /api/acceleration/channels — generic, keys named lv/ll/rv/rl/pv/pl…
+// Convention: two-letter prefix per sensor slot (l=left,r=right,p=pivot,4th=q…)
+// then v (vertical, from z) / l (lateral, from x).
+const CHANNEL_PREFIX = { left: 'l', right: 'r', pivot: 'p' };
+// For any future sensor not in this map, falls back to first letter of id.
+function channelPrefixFor(id) {
+    return CHANNEL_PREFIX[id] || id[0];
+}
+
 app.get('/api/acceleration/channels', async (req, res) => {
     try {
         const minutes = Math.min(parseInt(req.query.minutes) || 2, 1440);
-        const anchorR = await pool.query(
-            'SELECT timestamp FROM realtime_data ORDER BY timestamp DESC LIMIT 1'
-        );
+        const anchorR = await pool.query('SELECT timestamp FROM realtime_data ORDER BY timestamp DESC LIMIT 1');
         const anchorTs = anchorR.rows.length ? new Date(anchorR.rows[0].timestamp) : new Date();
         const cutoff   = new Date(anchorTs.getTime() - minutes * 60000).toISOString();
 
@@ -707,19 +750,24 @@ app.get('/api/acceleration/channels', async (req, res) => {
             SELECT sensor, x, y, z, timestamp
             FROM realtime_data
             WHERE timestamp >= $1
-            ORDER BY timestamp ASC LIMIT 20000
+            ORDER BY timestamp ASC LIMIT 30000
         `, [cutoff]);
 
         const buckets = {};
         for (const doc of r.rows) {
             const sec = new Date(doc.timestamp).toISOString().slice(0, 19);
-            if (!buckets[sec]) buckets[sec] = { ts: sec, lv: null, ll: null, rv: null, rl: null };
-            if (doc.sensor === 'left') {
-                buckets[sec].lv = doc.z != null ? +parseFloat(doc.z).toFixed(4) : null;
-                buckets[sec].ll = doc.x != null ? +parseFloat(doc.x).toFixed(4) : null;
-            } else if (doc.sensor === 'right') {
-                buckets[sec].rv = doc.z != null ? +parseFloat(doc.z).toFixed(4) : null;
-                buckets[sec].rl = doc.x != null ? +parseFloat(doc.x).toFixed(4) : null;
+            if (!buckets[sec]) {
+                buckets[sec] = { ts: sec };
+                SENSOR_IDS.forEach(id => {
+                    const p = channelPrefixFor(id);
+                    buckets[sec][`${p}v`] = null;
+                    buckets[sec][`${p}l`] = null;
+                });
+            }
+            if (SENSOR_IDS.includes(doc.sensor)) {
+                const p = channelPrefixFor(doc.sensor);
+                buckets[sec][`${p}v`] = doc.z != null ? +parseFloat(doc.z).toFixed(4) : null;
+                buckets[sec][`${p}l`] = doc.x != null ? +parseFloat(doc.x).toFixed(4) : null;
             }
         }
         res.json(Object.values(buckets).sort((a, b) => a.ts.localeCompare(b.ts)));
@@ -729,20 +777,23 @@ app.get('/api/acceleration/channels', async (req, res) => {
     }
 });
 
-// GET /api/management/sensor-chart-recent
+// ── GET /api/management/sensor-chart-recent — generic, one key per sensor id
 app.get('/api/management/sensor-chart-recent', async (_req, res) => {
     try {
         const cutoff = new Date(Date.now() - 2 * 60000).toISOString();
         const r = await pool.query(`
             SELECT sensor, g_force, timestamp FROM realtime_data
             WHERE timestamp >= $1
-            ORDER BY timestamp ASC LIMIT 5000
+            ORDER BY timestamp ASC LIMIT 8000
         `, [cutoff]);
         const buckets = {};
         for (const doc of r.rows) {
             const sec = new Date(doc.timestamp).toISOString().slice(0, 19);
-            if (!buckets[sec]) buckets[sec] = { ts: sec, left: null, right: null };
-            buckets[sec][doc.sensor] = doc.g_force || 0;
+            if (!buckets[sec]) {
+                buckets[sec] = { ts: sec };
+                SENSOR_IDS.forEach(id => { buckets[sec][id] = null; });
+            }
+            if (SENSOR_IDS.includes(doc.sensor)) buckets[sec][doc.sensor] = doc.g_force || 0;
         }
         res.json(Object.values(buckets).sort((a, b) => a.ts.localeCompare(b.ts)));
     } catch (e) {
@@ -751,7 +802,6 @@ app.get('/api/management/sensor-chart-recent', async (_req, res) => {
     }
 });
 
-// GET /api/management/uptime
 app.get('/api/management/uptime', async (req, res) => {
     const hours = 24;
     try {
@@ -763,19 +813,13 @@ app.get('/api/management/uptime', async (req, res) => {
         `, [cutoff]);
         const activeHours = parseInt(r.rows[0].active_hours);
         const pct         = +((activeHours / hours) * 100).toFixed(1);
-        res.json({
-            uptime_pct:      pct,
-            active_hours:    activeHours,
-            window_hours:    hours,
-            server_uptime_s: Math.floor(process.uptime())
-        });
+        res.json({ uptime_pct: pct, active_hours: activeHours, window_hours: hours, server_uptime_s: Math.floor(process.uptime()) });
     } catch (e) {
         console.error('/api/management/uptime error:', e.message);
         res.status(500).json({ error: e.message });
     }
 });
 
-// GET /api/latest/gps
 app.get('/api/latest/gps', async (_req, res) => {
     try {
         const r = await pool.query(`
@@ -790,7 +834,7 @@ app.get('/api/latest/gps', async (_req, res) => {
     }
 });
 
-// GET /api/management/active-sensors
+// ── GET /api/management/active-sensors — generic over SENSOR_IDS ──────────
 app.get('/api/management/active-sensors', async (req, res) => {
     try {
         const cutoff10s = new Date(Date.now() - 10 * 1000).toISOString();
@@ -800,15 +844,15 @@ app.get('/api/management/active-sensors', async (req, res) => {
         `);
         const lastSeen = {};
         for (const row of r.rows) {
-            const ts = new Date(row.timestamp).toISOString();
-            lastSeen[row.sensor] = ts;
+            if (SENSOR_IDS.includes(row.sensor)) lastSeen[row.sensor] = new Date(row.timestamp).toISOString();
         }
         const sensors       = Object.keys(lastSeen);
         const onlineSensors = sensors.filter(s => lastSeen[s] >= cutoff10s);
         const knownSensors  = sensors.filter(s => lastSeen[s] <  cutoff10s);
         res.json({
             count: onlineSensors.length, total_known: sensors.length,
-            online: onlineSensors, last_known: knownSensors, last_seen: lastSeen
+            online: onlineSensors, last_known: knownSensors, last_seen: lastSeen,
+            registered_sensors: SENSOR_IDS   // full list, incl. never-seen ones
         });
     } catch (e) {
         console.error('/api/management/active-sensors error:', e.message);
@@ -816,8 +860,6 @@ app.get('/api/management/active-sensors', async (req, res) => {
     }
 });
 
-// GET /api/management/active-alerts
-// HIGH/MEDIUM/LOW impact counts from peaksLog in last 24 h
 app.get('/api/management/active-alerts', async (req, res) => {
     try {
         const dbNow  = await getDBNow();
@@ -827,8 +869,7 @@ app.get('/api/management/active-alerts', async (req, res) => {
         const medium = recent.filter(p => p.severity === 'MEDIUM').length;
         const low    = recent.filter(p => p.severity === 'LOW').length;
         res.json({
-            total:             recent.length,
-            high, medium, low,
+            total: recent.length, high, medium, low,
             require_attention: high + medium,
             latest: [...recent].sort((a, b) => b.timestamp.localeCompare(a.timestamp)).slice(0, 5)
         });
@@ -838,7 +879,6 @@ app.get('/api/management/active-alerts', async (req, res) => {
     }
 });
 
-// GET /api/management/system-health
 app.get('/api/management/system-health', async (req, res) => {
     try {
         const cutoff10s = new Date(Date.now() - 10 * 1000).toISOString();
@@ -848,6 +888,7 @@ app.get('/api/management/system-health', async (req, res) => {
         `);
         let operational = 0, warning = 0, critical = 0;
         for (const doc of r.rows) {
+            if (!SENSOR_IDS.includes(doc.sensor)) continue;
             const g      = doc.g_force || 0;
             const isLive = new Date(doc.timestamp).toISOString() >= cutoff10s;
             if (!isLive)       critical++;
@@ -855,7 +896,7 @@ app.get('/api/management/system-health', async (req, res) => {
             else if (g >= 5)   warning++;
             else               operational++;
         }
-        if (r.rows.length === 0) critical = 2;
+        if (r.rows.length === 0) critical = SENSOR_IDS.length;
         res.json({ operational, warning, critical, total: operational + warning + critical });
     } catch (e) {
         console.error('/api/management/system-health error:', e.message);
@@ -863,7 +904,6 @@ app.get('/api/management/system-health', async (req, res) => {
     }
 });
 
-// GET /api/monitoring/all
 app.get('/api/monitoring/all', async (req, res) => {
     try {
         if (!pgReady) return res.status(503).json({ error: 'Database not ready' });
@@ -879,49 +919,26 @@ app.get('/api/monitoring/all', async (req, res) => {
     }
 });
 
-// ── GET /api/rci/average?days=1|7|30 ──────────────────────────────────────
+// ── RCI endpoints — unchanged, left-sensor is still the calibrated reference
 app.get('/api/rci/average', async (req, res) => {
     const days = Math.min(parseInt(req.query.days) || 1, 365);
     try {
         const dbNow  = await getDBNow();
         const cutoff = new Date(dbNow.getTime() - days * 86400000).toISOString();
-
         const r = await pool.query(`
-            SELECT rms_v 
-            FROM realtime_data 
-            WHERE timestamp >= $1 
-              AND sensor = 'left' 
-              AND rms_v IS NOT NULL
+            SELECT rms_v FROM realtime_data
+            WHERE timestamp >= $1 AND sensor = 'left' AND rms_v IS NOT NULL
         `, [cutoff]);
-
-        if (!r.rows.length) {
-            console.log(`[RCI] No data for ${days} days`);
-            return res.json({ avgRms: null, sampleCount: 0 });
-        }
-
+        if (!r.rows.length) return res.json({ avgRms: null, sampleCount: 0 });
         const sum = r.rows.reduce((acc, row) => acc + parseFloat(row.rms_v || 0), 0);
         const avgRms = sum / r.rows.length;
-
-        console.log(`[RCI] ${days} day avg RMS = ${avgRms.toFixed(4)} g (${r.rows.length} samples)`);
-        res.json({ 
-            avgRms: parseFloat(avgRms.toFixed(4)), 
-            sampleCount: r.rows.length 
-        });
+        res.json({ avgRms: parseFloat(avgRms.toFixed(4)), sampleCount: r.rows.length });
     } catch (e) {
         console.error('/api/rci/average error:', e.message);
         res.status(500).json({ error: e.message, avgRms: null });
     }
 });
 
-// ── GET /api/rci/timeseries?period=24h|7d|30d ─────────────────────────────
-// Returns time-bucketed avg RMS values (left sensor, stored in g-units) DESC.
-// Wz computation is intentionally NOT done here — all Sperling math lives in
-// the frontend (graphs.js) so unit conversions stay in one place.
-//
-// Bucket granularity:  24h → 1-minute buckets  (yesterday, IST midnight→midnight)
-//                       7d → 1-hour  buckets   (last 7 days from latest record)
-//                      30d → 4-hour  buckets   (last 30 days from latest record)
-// Response: { period, freq_hz, points: [{ timestamp, rms_v_g }], sampleCount }
 app.get('/api/rci/timeseries', async (req, res) => {
     const period = (req.query.period || '24h').toLowerCase();
     let hours, truncUnit, maxPoints;
@@ -932,9 +949,7 @@ app.get('/api/rci/timeseries', async (req, res) => {
     try {
         const dbNow = await getDBNow();
         let cutoff, upperBound;
-
         if (period === '24h') {
-            // Yesterday in IST: from midnight yesterday to midnight today
             const istNow           = DateTime.fromJSDate(dbNow).setZone('Asia/Kolkata');
             const startOfToday     = istNow.startOf('day');
             const startOfYesterday = startOfToday.minus({ days: 1 });
@@ -946,52 +961,31 @@ app.get('/api/rci/timeseries', async (req, res) => {
         }
 
         const r = await pool.query(`
-            SELECT
-                date_trunc($1, timestamp AT TIME ZONE 'Asia/Kolkata') AS bucket,
-                AVG(rms_v)  AS avg_rms_v,
-                COUNT(*)    AS sample_count
+            SELECT date_trunc($1, timestamp AT TIME ZONE 'Asia/Kolkata') AS bucket,
+                   AVG(rms_v) AS avg_rms_v, COUNT(*) AS sample_count
             FROM realtime_data
-            WHERE sensor      = 'left'
-              AND rms_v IS NOT NULL
-              AND rms_v > 0
-              AND timestamp  >= $2
-              AND timestamp  <  $3
-            GROUP BY bucket
-            ORDER BY bucket DESC
-            LIMIT $4
+            WHERE sensor = 'left' AND rms_v IS NOT NULL AND rms_v > 0
+              AND timestamp >= $2 AND timestamp < $3
+            GROUP BY bucket ORDER BY bucket DESC LIMIT $4
         `, [truncUnit, cutoff, upperBound, maxPoints]);
 
-        if (!r.rows.length) {
-            console.log(`[RCI timeseries] No data for period=${period}`);
-            return res.json({ period, freq_hz: 100, points: [], sampleCount: 0 });
-        }
+        if (!r.rows.length) return res.json({ period, freq_hz: 100, points: [], sampleCount: 0 });
 
-        // Return raw rms_v in g — Sperling Wz computation is done entirely in frontend
         const points = r.rows.map(row => ({
-            timestamp: row.bucket,                          // IST bucket timestamp
+            timestamp: row.bucket,
             rms_v_g:   parseFloat(parseFloat(row.avg_rms_v).toFixed(5)),
-            n:         parseInt(row.sample_count)           // samples in bucket (debug aid)
+            n:         parseInt(row.sample_count)
         }));
-
-        console.log(`[RCI timeseries] period=${period} → ${points.length} buckets | ` +
-                    `rms range: ${Math.min(...points.map(p=>p.rms_v_g)).toFixed(4)}–` +
-                    `${Math.max(...points.map(p=>p.rms_v_g)).toFixed(4)} g`);
-
         res.json({ period, freq_hz: 100, points, sampleCount: points.length });
-
     } catch (e) {
         console.error('/api/rci/timeseries error:', e.message);
         res.status(500).json({ error: e.message, points: [] });
     }
 });
 
-// POST /api/device/reset — publishes RESET command to the embedded device
 app.post('/api/device/reset', (_req, res) => {
     mqttClient.publish('adj/datalogger/client_request', 'RESET', { qos: 1 }, (err) => {
-        if (err) {
-            console.error('RESET publish error:', err.message);
-            return res.status(500).json({ success: false, error: err.message });
-        }
+        if (err) { console.error('RESET publish error:', err.message); return res.status(500).json({ success: false, error: err.message }); }
         console.log('RESET command sent to device');
         res.json({ success: true });
     });
@@ -1000,25 +994,19 @@ app.post('/api/device/reset', (_req, res) => {
 app.get('/health', async (req, res) => {
     try {
         await pool.query('SELECT 1');
-        res.json({ status: 'OK', timestamp: new Date(), postgres: 'connected',
-                   mqtt: mqttConnected, last_data: lastDataTimestamp });
+        res.json({ status: 'OK', timestamp: new Date(), postgres: 'connected', mqtt: mqttConnected, last_data: lastDataTimestamp, registered_sensors: SENSOR_IDS });
     } catch (e) {
         res.json({ status: 'ERROR', timestamp: new Date(), postgres: 'disconnected', error: e.message });
     }
 });
 
-// GET /api/dates-with-data — returns array of "YYYY-MM-DD" strings that have records
-// ── GET /api/map/events ───────────────────────────────────────────────────
-// Returns accelerometer events with GPS coords for the map page.
-// Query params: severity=all|high|medium|low  date=YYYY-MM-DD  hours=24
+// ── Map endpoints ────────────────────────────────────────────────────────
 app.get('/api/map/events', async (req, res) => {
     try {
         if (!pgReady) return res.json([]);
         const severity = req.query.severity || 'all';
         let startTime, endTime;
-
         if (req.query.date) {
-            // Full calendar day in IST
             startTime = new Date(`${req.query.date}T00:00:00+05:30`).toISOString();
             endTime   = new Date(`${req.query.date}T23:59:59+05:30`).toISOString();
         } else {
@@ -1027,13 +1015,9 @@ app.get('/api/map/events', async (req, res) => {
             endTime   = dbNow.toISOString();
             startTime = new Date(dbNow.getTime() - hours * 3600000).toISOString();
         }
-
         let sevClause = '';
         const params  = [startTime, endTime];
-        if (severity !== 'all') {
-            params.push(severity.toUpperCase());
-            sevClause = `AND severity = $${params.length}`;
-        }
+        if (severity !== 'all') { params.push(severity.toUpperCase()); sevClause = `AND severity = $${params.length}`; }
 
         const r = await pool.query(`
             SELECT id, timestamp AT TIME ZONE 'Asia/Kolkata' AS ts,
@@ -1044,23 +1028,13 @@ app.get('/api/map/events', async (req, res) => {
               AND lat IS NOT NULL AND lat != 0
               AND lng IS NOT NULL AND lng != 0
               ${sevClause}
-            ORDER BY timestamp DESC
-            LIMIT 2000
+            ORDER BY timestamp DESC LIMIT 2000
         `, params);
 
         res.json(r.rows.map(e => ({
-            id:         e.id,
-            timestamp:  e.ts,
-            sensor:     e.sensor,
-            severity:   e.severity,
-            peak_g:     e.peak_g,
-            g_force:    e.g_force,
-            rms_v:      e.rms_v,
-            rms_l:      e.rms_l,
-            p_class:    e.p_class,
-            distance_m: e.distance_m,
-            lat:        e.lat,
-            lng:        e.lng
+            id: e.id, timestamp: e.ts, sensor: e.sensor, severity: e.severity,
+            peak_g: e.peak_g, g_force: e.g_force, rms_v: e.rms_v, rms_l: e.rms_l,
+            p_class: e.p_class, distance_m: e.distance_m, lat: e.lat, lng: e.lng
         })));
     } catch (e) {
         console.error('/api/map/events error:', e.message);
@@ -1068,14 +1042,10 @@ app.get('/api/map/events', async (req, res) => {
     }
 });
 
-// ── GET /api/map/gps-track ────────────────────────────────────────────────
-// Returns GPS track points for a given date to draw the route polyline.
-// Query params: date=YYYY-MM-DD  hours=24  step=5 (every Nth point)
 app.get('/api/map/gps-track', async (req, res) => {
     try {
         if (!pgReady) return res.json([]);
         let startTime, endTime;
-
         if (req.query.date) {
             startTime = new Date(`${req.query.date}T00:00:00+05:30`).toISOString();
             endTime   = new Date(`${req.query.date}T23:59:59+05:30`).toISOString();
@@ -1085,8 +1055,6 @@ app.get('/api/map/gps-track', async (req, res) => {
             endTime   = dbNow.toISOString();
             startTime = new Date(dbNow.getTime() - hours * 3600000).toISOString();
         }
-
-        // Downsample — every 10th point is enough for a route line
         const r = await pool.query(`
             SELECT lat, lng, speed_kmh, total_distance_m,
                    timestamp AT TIME ZONE 'Asia/Kolkata' AS ts
@@ -1096,18 +1064,9 @@ app.get('/api/map/gps-track', async (req, res) => {
                 WHERE timestamp >= $1 AND timestamp <= $2
                   AND lat IS NOT NULL AND lat != 0
                   AND lng IS NOT NULL AND lng != 0
-            ) sub
-            WHERE rn % 10 = 0
-            ORDER BY ts
+            ) sub WHERE rn % 10 = 0 ORDER BY ts
         `, [startTime, endTime]);
-
-        res.json(r.rows.map(p => ({
-            lat:        p.lat,
-            lng:        p.lng,
-            speed_kmh:  p.speed_kmh,
-            distance_m: p.total_distance_m,
-            timestamp:  p.ts
-        })));
+        res.json(r.rows.map(p => ({ lat: p.lat, lng: p.lng, speed_kmh: p.speed_kmh, distance_m: p.total_distance_m, timestamp: p.ts })));
     } catch (e) {
         console.error('/api/map/gps-track error:', e.message);
         res.status(500).json([]);
@@ -1119,13 +1078,10 @@ app.get('/api/dates-with-data', async (_req, res) => {
         if (pgReady) {
             const r = await pool.query(`
                 SELECT DISTINCT to_char(DATE(timestamp AT TIME ZONE 'Asia/Kolkata'), 'YYYY-MM-DD') AS day
-                FROM realtime_data
-                ORDER BY day DESC
-                LIMIT 365
+                FROM realtime_data ORDER BY day DESC LIMIT 365
             `);
             return res.json(r.rows.map(r => r.day));
         }
-        // JSON fallback
         const days = [...new Set(peaksLog.map(p => p.timestamp.slice(0, 10)))].sort().reverse();
         res.json(days);
     } catch (e) {
@@ -1135,44 +1091,43 @@ app.get('/api/dates-with-data', async (_req, res) => {
 });
 
 app.get('/api', (req, res) => {
-    res.json({ message: 'Railway Monitoring API', endpoints: {
-        impacts:          'GET /api/impacts',
-        impacts_stats:    'GET /api/impacts/stats?hours=24',
-        historical_graph: 'GET /api/historical/graph/:hours',
-        realtime_status:  'GET /api/realtime/status',
-        health:           'GET /health'
-    }});
+    res.json({
+        message: 'Railway Monitoring API',
+        registered_sensors: SENSORS.map(s => ({ id: s.id, label: s.label })),
+        endpoints: {
+            impacts:          'GET /api/impacts',
+            impacts_stats:    'GET /api/impacts/stats?hours=24',
+            historical_graph: 'GET /api/historical/graph/:hours',
+            realtime_status:  'GET /api/realtime/status',
+            health:           'GET /health'
+        }
+    });
 });
 
 // ── WebSocket ─────────────────────────────────────────────────────────────
 io.on('connection', async (socket) => {
     console.log('Client connected:', socket.id);
-
-    // Send historical chart data
     try {
         const dbNow     = await getDBNow();
         const timeLimit = new Date(dbNow.getTime() - 86400000).toISOString();
         const r = await pool.query(`
-            SELECT x_axis, y_axis, z_axis, timestamp,
+            SELECT device_id, x_axis, y_axis, z_axis, timestamp,
                    rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l
             FROM monitoring_data
             WHERE timestamp >= $1
-            ORDER BY timestamp ASC LIMIT 2000
+            ORDER BY timestamp ASC LIMIT 6000
         `, [timeLimit]);
         socket.emit('historical-data', r.rows.map((doc, i) => ({
-            distance:  i * 100,
-            accel1:    doc.x_axis || 0, accel2: doc.y_axis || 0,
-            magnitude: doc.z_axis || 0, timestamp: doc.timestamp,
-            rmsV: doc.rms_v, rmsL: doc.rms_l,
-            sdV:  doc.sd_v,  sdL:  doc.sd_l,
-            p2pV: doc.p2p_v, p2pL: doc.p2p_l
+            distance: i * 100, device_id: doc.device_id,
+            x_axis: doc.x_axis || 0, y_axis: doc.y_axis || 0, z_axis: doc.z_axis || 0,
+            timestamp: doc.timestamp,
+            rmsV: doc.rms_v, rmsL: doc.rms_l, sdV: doc.sd_v, sdL: doc.sd_l, p2pV: doc.p2p_v, p2pL: doc.p2p_l
         })));
     } catch (e) {
         console.error('sendHistoricalData error:', e.message);
         socket.emit('historical-data', []);
     }
 
-    // Send current stats immediately on connect so frontend shows correct counts
     try {
         const stats = await computeStats(24);
         socket.emit('stats-update', stats);
@@ -1184,28 +1139,145 @@ io.on('connection', async (socket) => {
     socket.on('disconnect', () => console.log('Client disconnected:', socket.id));
 });
 
-// ── MQTT handler ──────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════
+// ── MQTT handler ────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════
 mqttClient.on('error', err => { console.error('MQTT error:', err.message); mqttConnected = false; });
 mqttClient.on('close', ()  => { console.warn('MQTT closed'); mqttConnected = false; });
 
 mqttClient.on('connect', () => {
     console.log(`MQTT Connected to ${process.env.MQTT_HOST}:${process.env.MQTT_PORT}`);
     mqttConnected = true;
-    [
-        'adj/datalogger/sensors/left',
-        'adj/datalogger/sensors/right',
+    const topics = [
+        ...SENSORS.map(s => s.mqttTopic),
         'adj/datalogger/sensors/event',
         'adj/datalogger/health',
         'adj/datalogger/sensors/accelerometer',
-        'adj/datalogger/sensors/gps'
-
-    ].forEach(topic => {
+        'adj/datalogger/sensors/gps',
+    ];
+    topics.forEach(topic => {
         mqttClient.subscribe(topic, err => {
             if (err) console.error(`Subscribe failed ${topic}:`, err.message);
             else     console.log(`Subscribed: ${topic}`);
         });
     });
 });
+
+// ── Shared helper: process one sensor's 68-byte binary reading, generic ────
+async function handleBinarySensorPacket(sensorMeta, message, timestamp) {
+    const sensorId = sensorMeta.id;
+
+    const x     = message.readFloatLE(1);
+    const y     = message.readFloatLE(5);
+    const z     = message.readFloatLE(9);
+    const rmsV  = message.readFloatLE(13);
+    const rmsL  = message.readFloatLE(17);
+    const sdV   = message.readFloatLE(21);
+    const sdL   = message.readFloatLE(25);
+    const p2pV  = message.readFloatLE(29);
+    const p2pL  = message.readFloatLE(33);
+    const peak  = message.readFloatLE(37);
+    const tsMs  = message.readUInt32LE(41);
+    const latRaw = message.readFloatLE(45);
+    const lonRaw = message.readFloatLE(49);
+    const sats    = message.readUInt16LE(53);
+    const speedMs = message.readFloatLE(55);
+    const hh = message.readUInt8(59), mm_t = message.readUInt8(60), ss = message.readUInt8(61);
+    const dd = message.readUInt8(62), mo = message.readUInt8(63), yr = message.readUInt16LE(64);
+
+    const lat    = +(latRaw / 1e6).toFixed(6);
+    const lng    = +(lonRaw / 1e6).toFixed(6);
+    const gForce = Math.sqrt(x**2 + y**2 + z**2);
+
+    console.log(`[binary] [${sensorId}]: Ax=${x.toFixed(4)} Ay=${y.toFixed(4)} Az=${z.toFixed(4)} gForce=${gForce.toFixed(4)} PEAK=${peak.toFixed(4)} GPS=${lat},${lng} SAT=${sats}`);
+
+    sensorLastSeen[sensorId] = Date.now();
+
+    // Health — generic across all registered sensors
+    const now = Date.now();
+    const inferredHealth = Object.assign({}, lastHealthStatus || {}, {
+        w5500: 'OK', phyLink: 'OK', tcp: 'OK', spi1: 'OK', usart2: 'OK',
+    });
+    SENSORS.forEach(s => {
+        inferredHealth[s.healthKey] = (now - sensorLastSeen[s.id]) < SENSOR_TIMEOUT_MS ? 'OK' : 'FAIL';
+    });
+    lastHealthStatus = inferredHealth;
+    io.emit('system-health', inferredHealth);
+
+    // GPS — only sensor "left" is treated as the reference GPS source, same as before
+    if (sensorId === 'left' && lat && lng) {
+        if (lastGpsCoord) {
+            const dLat = (lat - lastGpsCoord.lat) * Math.PI / 180;
+            const dLon = (lng - lastGpsCoord.lng) * Math.PI / 180;
+            const a    = Math.sin(dLat/2)**2 + Math.cos(lastGpsCoord.lat * Math.PI/180) * Math.cos(lat * Math.PI/180) * Math.sin(dLon/2)**2;
+            const d    = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            if (d >= 5 && d < 500) totalDistanceM += d;
+        }
+        lastGpsCoord = { lat, lng };
+        const speedKmh = +(speedMs * 0.036).toFixed(2);
+        io.emit('gps-data', { lat, lng, speedKmh, totalDistanceM, timestamp });
+        if (pgReady) {
+            pool.query('INSERT INTO rm_gps (timestamp, lat, lng, speed_kmh, total_distance_m) VALUES ($1,$2,$3,$4,$5)',
+                [timestamp, lat, lng, speedKmh, totalDistanceM]).catch(e => console.error('gps insert:', e.message));
+        }
+    }
+
+    // Store readings — device_id/sensor = sensorId, generic
+    if (pgReady) {
+        pool.query(
+            `INSERT INTO monitoring_data
+             (timestamp, type, device_id, x_axis, y_axis, z_axis, g_force, rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l, peak)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+            [timestamp, 'accelerometer', sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak]
+        ).catch(e => console.error('monitoring_data insert:', e.message));
+
+        pool.query(
+            `INSERT INTO realtime_data
+             (timestamp, sensor, x, y, z, g_force, rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l, peak)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+            [timestamp, sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak]
+        ).catch(e => console.error('realtime_data insert:', e.message));
+    }
+
+    // Impact detection — generic, works for any registered sensor
+    const peakVal = peak || gForce;
+    if (peakVal > 2) {
+        // ★ PIVOT CHANGE — pass sensorId through so pivot classifies against
+        // pivotClassThresholds instead of the axle bands
+        const pClass   = getPClass(peakVal, sensorId);
+        const severity = getSeverity(peakVal, sensorId);
+        const impact   = {
+            timestamp, sensor: sensorId, severity, peak_g: peakVal, gForce,
+            rmsV, rmsL, sdV, sdL, p2pV, p2pL, x, y, z, distance_m: totalDistanceM, p_class: pClass
+        };
+        peaksLog.push(impact);
+        savePeaksLog(peaksLog);
+        if (pgReady) {
+            const hasGpsFix = lastGpsCoord?.lat && lastGpsCoord?.lng;
+            pool.query(
+                `INSERT INTO accelerometer_events
+                 (timestamp, sensor, severity, peak_g, g_force,
+                  rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l,
+                  x, y, z, distance_m, p_class, lat, lng)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+                [timestamp, sensorId, severity, peakVal, gForce,
+                 rmsV, rmsL, sdV, sdL, p2pV, p2pL,
+                 x, y, z, totalDistanceM, pClass,
+                 hasGpsFix ? lastGpsCoord.lat : null,
+                 hasGpsFix ? lastGpsCoord.lng : null]
+            ).catch(e => console.error('events insert:', e.message));
+        }
+        io.emit('new-impact', impact);
+        computeStats(24).then(stats => io.emit('stats-update', stats)).catch(() => {});
+    }
+
+    // Real-time broadcast, respecting per-sensor ODR decimation
+    if (shouldEmit(sensorId)) {
+        io.emit('accelerometer-data', { sensor: sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, timestamp });
+    } else {
+        console.log(`[ODR] Dropped: ${sensorId} @ ${odrConfig[sensorMeta.odrKey]}Hz`);
+    }
+}
 
 mqttClient.on('message', async (topic, message) => {
     try {
@@ -1214,11 +1286,9 @@ mqttClient.on('message', async (topic, message) => {
 
         console.log(`\n=== Received on: ${topic} ===`);
 
-        // ── Binary packet path (STM32 via W5500 Ethernet → MQTT directly) ───
-        // S1/S2: 66 bytes, first byte 0x01 or 0x02
-        // EVENT:  13 bytes, first byte 0x03
         const pktType = message[0];
 
+        // EVENT packet (fixed type 0x03, unaffected by SENSORS registry)
         if (pktType === 0x03 && message.length === 15) {
             const ts     = message.readUInt32LE(1);
             const s1_mag = message.readFloatLE(5);
@@ -1228,157 +1298,25 @@ mqttClient.on('message', async (topic, message) => {
             return;
         }
 
-        if ((pktType === 0x01 || pktType === 0x02) && message.length === 68) {
-            const sensorSide = pktType === 0x01 ? 'left' : 'right';
-
-            // ── Accelerometer fields (offsets per official packet spec) ───
-            const x     = message.readFloatLE(1);   // Ax
-            const y     = message.readFloatLE(5);   // Ay
-            const z     = message.readFloatLE(9);   // Az
-            const rmsV  = message.readFloatLE(13);  // RMS-V  (vertical RMS)
-            const rmsL  = message.readFloatLE(17);  // RMS-L  (lateral RMS)
-            const sdV   = message.readFloatLE(21);  // SD-V   (vertical std dev)
-            const sdL   = message.readFloatLE(25);  // SD-L   (lateral std dev)
-            const p2pV  = message.readFloatLE(29);  // P2P-V  (peak-to-peak vertical)
-            const p2pL  = message.readFloatLE(33);  // P2P-L  (peak-to-peak lateral)
-            const peak  = message.readFloatLE(37);  // PEAK   (max G-force)
-            const ts    = message.readUInt32LE(41); // Timestamp (ms)
-            const latRaw = message.readFloatLE(45); // Latitude  (raw × 1e6)
-            const lonRaw = message.readFloatLE(49); // Longitude (raw × 1e6)
-            const sats    = message.readUInt16LE(53); // Satellites (uint16)
-            const speedMs = message.readFloatLE(55);  // Speed cm/s (firmware packs gps_data.speed_cms)
-            const hh    = message.readUInt8(59);    // Hour
-            const mm_t  = message.readUInt8(60);    // Minute
-            const ss    = message.readUInt8(61);    // Second
-            const dd    = message.readUInt8(62);    // Day
-            const mo    = message.readUInt8(63);    // Month
-            const yr    = message.readUInt16LE(64); // Year
-
-            const lat    = +(latRaw / 1e6).toFixed(6);
-            const lng    = +(lonRaw / 1e6).toFixed(6);
-            const gForce = Math.sqrt(x**2 + y**2 + z**2);
-
-            console.log(`[binary] [${sensorSide}]: Ax=${x.toFixed(4)} Ay=${y.toFixed(4)} Az=${z.toFixed(4)} gForce=${gForce.toFixed(4)} PEAK=${peak.toFixed(4)} RMS-V=${rmsV.toFixed(4)} RMS-L=${rmsL.toFixed(4)} SD-V=${sdV.toFixed(4)} SD-L=${sdL.toFixed(4)} P2P-V=${p2pV.toFixed(4)} P2P-L=${p2pL.toFixed(4)} GPS=${lat},${lng} SAT=${sats} SPD=${(speedMs*3.6).toFixed(1)}km/h ${String(hh).padStart(2,'0')}:${String(mm_t).padStart(2,'0')}:${String(ss).padStart(2,'0')} ${String(dd).padStart(2,'0')}/${String(mo).padStart(2,'0')}/${yr}`);
-
-            // Track last-seen time per sensor
-            if (pktType === 0x01) sensorLastSeen.s1 = Date.now();
-            if (pktType === 0x02) sensorLastSeen.s2 = Date.now();
-
-            const now = Date.now();
-            const inferredHealth = Object.assign({}, lastHealthStatus || {}, {
-                w5500:      'OK',
-                phyLink:    'OK',
-                tcp:        'OK',
-                spi1:       'OK',
-                usart2:     'OK',
-                adxl345_s1: (now - sensorLastSeen.s1) < SENSOR_TIMEOUT_MS ? 'OK' : 'FAIL',
-                adxl345_s2: (now - sensorLastSeen.s2) < SENSOR_TIMEOUT_MS ? 'OK' : 'FAIL',
-            });
-            lastHealthStatus = inferredHealth;
-            io.emit('system-health', inferredHealth);
-
-            // GPS update — lat/lon decoded from float in packet (already decimal degrees ÷ 1e6)
-            if (lat && lng) {
-                if (lastGpsCoord) {
-                    const dLat = (lat - lastGpsCoord.lat) * Math.PI / 180;
-                    const dLon = (lng - lastGpsCoord.lng) * Math.PI / 180;
-                    const a    = Math.sin(dLat/2)**2 +
-                                 Math.cos(lastGpsCoord.lat * Math.PI/180) *
-                                 Math.cos(lat * Math.PI/180) *
-                                 Math.sin(dLon/2)**2;
-                    const d    = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-                    // 5 m minimum filters float32 GPS noise when stationary
-                    if (d >= 5 && d < 500) totalDistanceM += d;
-                }
-                lastGpsCoord = { lat, lng };
-                const speedKmh = +(speedMs * 0.036).toFixed(2); // cm/s → km/h
-                io.emit('gps-data', { lat, lng, speedKmh, totalDistanceM, timestamp });
-                if (pgReady) {
-                    pool.query(
-                        'INSERT INTO rm_gps (timestamp, lat, lng, speed_kmh, total_distance_m) VALUES ($1,$2,$3,$4,$5)',
-                        [timestamp, lat, lng, speedKmh, totalDistanceM]
-                    ).catch(e => console.error('gps insert:', e.message));
-                }
-            }
-
-            // Store readings
-            if (pgReady) {
-                pool.query(
-                    `INSERT INTO monitoring_data
-                     (timestamp, type, device_id, x_axis, y_axis, z_axis,
-                      g_force, rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l, peak)
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-                    [timestamp, 'accelerometer', sensorSide,
-                     x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak]
-                ).catch(e => console.error('monitoring_data insert:', e.message));
-
-                pool.query(
-                    `INSERT INTO realtime_data
-                     (timestamp, sensor, x, y, z, g_force, rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l, peak)
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-                    [timestamp, sensorSide, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak]
-                ).catch(e => console.error('realtime_data insert:', e.message));
-            }
-
-            // Impact detection
-            const peakVal = peak || gForce;
-            if (peakVal > 2) {
-                const pClass   = getPClass(peakVal);
-                const severity = getSeverity(peakVal);
-                const impact   = {
-                    timestamp, sensor: sensorSide, severity, peak_g: peakVal, gForce,
-                    rmsV, rmsL, sdV, sdL, p2pV, p2pL,
-                    x, y, z, distance_m: totalDistanceM, p_class: pClass
-                };
-                peaksLog.push(impact);
-                savePeaksLog(peaksLog);
-                if (pgReady) {
-                    const hasGpsFix = lastGpsCoord?.lat && lastGpsCoord?.lng;
-                    pool.query(
-                        `INSERT INTO accelerometer_events
-                         (timestamp, sensor, severity, peak_g, g_force,
-                          rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l,
-                          x, y, z, distance_m, p_class, lat, lng)
-                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
-                        [timestamp, sensorSide, severity, peakVal, gForce,
-                         rmsV, rmsL, sdV, sdL, p2pV, p2pL,
-                         x, y, z, totalDistanceM, pClass,
-                         hasGpsFix ? lastGpsCoord.lat : null,
-                         hasGpsFix ? lastGpsCoord.lng : null]
-                    ).catch(e => console.error('events insert:', e.message));
-                }
-                io.emit('new-impact', impact);
-                computeStats(24).then(stats => io.emit('stats-update', stats)).catch(() => {});
-            }
-
-            // Real-time broadcast (respects ODR decimation)
-            const odrKey = sensorSide === 'left' ? 'accel1' : 'accel2';
-            if (shouldEmit(odrKey)) {
-                io.emit('accelerometer-data', {
-                    sensor: sensorSide, x, y, z, gForce,
-                    rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, timestamp
-                });
-            } else {
-                console.log(`[ODR] Dropped: ${sensorSide} @ ${odrConfig[odrKey]}Hz`);
-            }
+        // Generic sensor packet — matched against SENSORS registry by packetType byte
+        const sensorMeta = sensorByPacketType(pktType);
+        if (sensorMeta && message.length === 68) {
+            await handleBinarySensorPacket(sensorMeta, message, timestamp);
             return;
         }
 
-        // ── Text path (legacy / health) ───────────────────────────────────
+        // ── Legacy text path (health / GPS / older firmware) ──────────────
         const msgStr = message.toString();
         console.log(`Raw: ${msgStr.substring(0, 200)}`);
 
-        // ── Health topic ──────────────────────────────────────────────────
         if (topic === 'adj/datalogger/health') {
             const health = parseHealthMessage(msgStr);
-            lastHealthStatus = health; // persist for /api/latest/health
+            lastHealthStatus = health;
             console.log('Health:', health);
             io.emit('system-health', health);
             return;
         }
 
-        // ── GPS — detect by message content (may be embedded in sensor message) ──
-        // Format: GPS:T-13:13:47 D-27-03-2026 LAT:28584835N LON:77315948E SPD:25cm/s
         if (msgStr.includes('[GPS]') || msgStr.includes('GPS:')) {
             const latM  = msgStr.match(/LAT:(\d+)([NS])/i);
             const lonM  = msgStr.match(/LON:(\d+)([EW])/i);
@@ -1396,37 +1334,26 @@ mqttClient.on('message', async (topic, message) => {
                     const R    = 6371000;
                     const dLat = (lat - lastGpsCoord.lat) * Math.PI / 180;
                     const dLon = (lng - lastGpsCoord.lng) * Math.PI / 180;
-                    const a    = Math.sin(dLat/2)**2 +
-                                 Math.cos(lastGpsCoord.lat * Math.PI/180) *
-                                 Math.cos(lat * Math.PI/180) *
-                                 Math.sin(dLon/2)**2;
+                    const a    = Math.sin(dLat/2)**2 + Math.cos(lastGpsCoord.lat * Math.PI/180) * Math.cos(lat * Math.PI/180) * Math.sin(dLon/2)**2;
                     const d    = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
                     if (d >= 5 && d < 500) totalDistanceM += d;
                 }
                 lastGpsCoord = { lat, lng };
-
-                const gpsPayload = { lat, lng, speedKmh, totalDistanceM, timestamp };
-                io.emit('gps-data', gpsPayload);
+                io.emit('gps-data', { lat, lng, speedKmh, totalDistanceM, timestamp });
                 if (pgReady) {
-                    pool.query(
-                        'INSERT INTO rm_gps (timestamp, lat, lng, speed_kmh, total_distance_m) VALUES ($1,$2,$3,$4,$5)',
-                        [timestamp, lat, lng, speedKmh, totalDistanceM]
-                    ).catch(e => console.error('gps insert:', e.message));
+                    pool.query('INSERT INTO rm_gps (timestamp, lat, lng, speed_kmh, total_distance_m) VALUES ($1,$2,$3,$4,$5)',
+                        [timestamp, lat, lng, speedKmh, totalDistanceM]).catch(e => console.error('gps insert:', e.message));
                 }
                 console.log(`GPS: lat=${lat} lng=${lng} spd=${speedKmh}km/h`);
             }
-
-            // If message is ONLY GPS (dedicated topic), stop here
             if (topic === 'adj/datalogger/sensors/gps' || topic.includes('gps')) return;
-            // Otherwise fall through to also parse sensor data below
         }
 
-        // ── Sensor topics only ────────────────────────────────────────────
-        const sensorSide = topic.includes('right') ? 'right'
-                         : topic.includes('left')  ? 'left' : null;
-        if (!sensorSide) return;
+        // Match topic to a registered sensor generically
+        const sensorMetaFromTopic = SENSORS.find(s => s.topicMatch(topic));
+        if (!sensorMetaFromTopic) return;
+        const sensorSide = sensorMetaFromTopic.id;
 
-        // Parse axes
         const ax = msgStr.match(/Ax\s*:\s*([+-]?\d+\.?\d*)/i);
         const ay = msgStr.match(/Ay\s*:\s*([+-]?\d+\.?\d*)/i);
         const az = msgStr.match(/Az\s*:\s*([+-]?\d+\.?\d*)/i);
@@ -1459,18 +1386,14 @@ mqttClient.on('message', async (topic, message) => {
         const win  = winm  ? parseInt(winm[1])     : null;
 
         const gForce = Math.sqrt(x**2 + y**2 + z**2);
-
         console.log(`Parsed [${sensorSide}]: x=${x} y=${y} z=${z} peak=${peak} gForce=${gForce.toFixed(4)}`);
 
-        // ── Store in monitoring_data ──────────────────────────────────────
         if (pgReady) {
             pool.query(
                 `INSERT INTO monitoring_data
-                 (timestamp, type, device_id, x_axis, y_axis, z_axis,
-                  g_force, rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l, peak, fs, window_ms)
+                 (timestamp, type, device_id, x_axis, y_axis, z_axis, g_force, rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l, peak, fs, window_ms)
                  VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
-                [timestamp, 'accelerometer', sensorSide,
-                 x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, fs, win]
+                [timestamp, 'accelerometer', sensorSide, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, fs, win]
             ).catch(e => console.error('monitoring_data insert:', e.message));
 
             pool.query(
@@ -1481,31 +1404,27 @@ mqttClient.on('message', async (topic, message) => {
             ).catch(e => console.error('realtime_data insert:', e.message));
         }
 
-        // ── Impact detection ──────────────────────────────────────────────
         const peakVal = peak || gForce;
         if (peakVal > 2) {
-            const pClass    = getPClass(peakVal);
-            const severity  = getSeverity(peakVal);
+            // ★ PIVOT CHANGE — pass sensorSide through so pivot classifies
+            // against pivotClassThresholds instead of the axle bands
+            const pClass    = getPClass(peakVal, sensorSide);
+            const severity  = getSeverity(peakVal, sensorSide);
             const impact    = {
                 timestamp, sensor: sensorSide, severity, peak_g: peakVal, gForce,
                 rmsV, rmsL, sdV, sdL, p2pV, p2pL, x, y, z, fs, window_ms: win,
-                distance_m: totalDistanceM,   // 0 when static, real value when GPS active
-                p_class:    pClass            // P1 / P2 / P3 / null
+                distance_m: totalDistanceM, p_class: pClass
             };
-
-            // Save to JSON fallback (always reliable)
             peaksLog.push(impact);
             savePeaksLog(peaksLog);
 
-            // Save to PostgreSQL
             if (pgReady) {
                 const hasGpsFix = lastGpsCoord && lastGpsCoord.lat && lastGpsCoord.lng;
                 pool.query(
                     `INSERT INTO accelerometer_events
                      (timestamp, sensor, severity, peak_g, g_force,
                       rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l,
-                      x, y, z, fs, window_ms, distance_m, p_class,
-                      lat, lng)
+                      x, y, z, fs, window_ms, distance_m, p_class, lat, lng)
                      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
                     [timestamp, sensorSide, impact.severity, impact.peak_g, gForce,
                      rmsV, rmsL, sdV, sdL, p2pV, p2pL,
@@ -1515,28 +1434,19 @@ mqttClient.on('message', async (topic, message) => {
                 ).catch(e => console.error('accelerometerEvents insert:', e.message));
             }
 
-            // Broadcast impact event
             io.emit('new-impact', impact);
             console.log(`IMPACT: ${peakVal.toFixed(3)}g (${severity}) on ${sensorSide}`);
-
-            // ── Broadcast fresh stats to ALL connected clients immediately ──
-            // This is what keeps the counters live without polling
             computeStats(24).then(stats => {
                 io.emit('stats-update', stats);
                 console.log(`[stats-update] broadcast: total=${stats.total} max=${stats.maxPeak.toFixed(2)}g source=${stats.source}`);
             }).catch(e => console.error('stats broadcast error:', e.message));
         }
 
-        // Broadcast raw sensor data — gated by server-side ODR decimation
-        const _odrKey = sensorSide === 'left' ? 'accel1' : 'accel2';
-        if (shouldEmit(_odrKey)) {
-            io.emit('accelerometer-data', {
-                sensor: sensorSide, x, y, z, gForce,
-                rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, timestamp
-            });
+        if (shouldEmit(sensorSide)) {
+            io.emit('accelerometer-data', { sensor: sensorSide, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, timestamp });
             console.log(`Broadcast: X=${x}, Y=${y}, Z=${z}, gForce=${gForce.toFixed(4)}g`);
         } else {
-            console.log(`[ODR] Dropped: ${sensorSide} @ ${odrConfig[_odrKey]}Hz`);
+            console.log(`[ODR] Dropped: ${sensorSide} @ ${odrConfig[sensorMetaFromTopic.odrKey]}Hz`);
         }
 
     } catch (error) {
@@ -1545,9 +1455,6 @@ mqttClient.on('message', async (topic, message) => {
 });
 
 // ── Start — single port: HTTP + binary GPS multiplexed ────────────────────
-// GPS board firmware connects to port 5000 with 0xAA 0x55 sync bytes.
-// First byte 0xAA → GPS binary handler; anything else → Express/socket.io.
-// No iptables redirect needed.
 const PORT         = process.env.PORT        || 5000;
 const GPS_BOARD_IP = process.env.GPS_BOARD_IP || '192.168.1.200';
 const PKT_SIZE     = 14;
@@ -1571,20 +1478,15 @@ function processGpsFix(lat, lng, speedKmh) {
         const R    = 6371000;
         const dLat = (lat - lastGpsCoord.lat) * Math.PI / 180;
         const dLon = (lng - lastGpsCoord.lng) * Math.PI / 180;
-        const a    = Math.sin(dLat / 2) ** 2 +
-                     Math.cos(lastGpsCoord.lat * Math.PI / 180) *
-                     Math.cos(lat * Math.PI / 180) *
-                     Math.sin(dLon / 2) ** 2;
+        const a    = Math.sin(dLat / 2) ** 2 + Math.cos(lastGpsCoord.lat * Math.PI / 180) * Math.cos(lat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
         const d    = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
         if (d >= 5 && d < 500) totalDistanceM += d;
     }
     lastGpsCoord = { lat, lng };
     io.emit('gps-data', { lat, lng, speedKmh, totalDistanceM, timestamp });
     if (pgReady) {
-        pool.query(
-            'INSERT INTO rm_gps (timestamp, lat, lng, speed_kmh, total_distance_m) VALUES ($1,$2,$3,$4,$5)',
-            [timestamp, lat, lng, speedKmh, totalDistanceM]
-        ).catch(e => console.error('[GPS-TCP] db insert:', e.message));
+        pool.query('INSERT INTO rm_gps (timestamp, lat, lng, speed_kmh, total_distance_m) VALUES ($1,$2,$3,$4,$5)',
+            [timestamp, lat, lng, speedKmh, totalDistanceM]).catch(e => console.error('[GPS-TCP] db insert:', e.message));
     }
     console.log(`[GPS-TCP] lat=${lat.toFixed(6)} lng=${lng.toFixed(6)} spd=${speedKmh.toFixed(2)}km/h dist=${(totalDistanceM/1000).toFixed(3)}km`);
 }
@@ -1613,7 +1515,7 @@ function handleGpsSocket(socket, firstChunk) {
             const crcCalc = crc16Ccitt(pkt.slice(2, 12));
             const crcPkt  = pkt.readUInt16BE(12);
             if (crcCalc !== crcPkt) {
-                console.log(`[GPS-TCP] CRC mismatch 0x${crcCalc.toString(16).toUpperCase()} vs 0x${crcPkt.toString(16).toUpperCase()} — resyncing`);
+                console.log(`[GPS-TCP] CRC mismatch — resyncing`);
                 rxBuf = rxBuf.slice(1);
                 continue;
             }
@@ -1652,55 +1554,40 @@ const tcpMux = net.createServer(rawSocket => {
 });
 
 tcpMux.listen(PORT, () => {
-    console.log(`Server running on port ${PORT} — HTTP + GPS binary on same port (no iptables needed)`);
+    console.log(`Server running on port ${PORT} — HTTP + GPS binary on same port`);
     console.log(`Local IP: ${LOCAL_IP}`);
     console.log(`Frontend: http://${LOCAL_IP}:${PORT}/index.html`);
-    console.log(`GPS board (${GPS_BOARD_IP}) connects directly to port ${PORT}`);
+    console.log(`Registered sensors: ${SENSOR_IDS.join(', ')}`);
     console.log(`PostgreSQL: ${process.env.PG_HOST || 'localhost'}:${process.env.PG_PORT || 5432}/${process.env.PG_DB || 'uabams'}`);
 });
 tcpMux.on('error', e => console.error(`[MUX] error: ${e.message}`));
 
 // ── Reset endpoint ────────────────────────────────────────────────────────
-// POST /api/reset
-// Body: { saveToDb: true }  → keep CouchDB, reset display only (peaksLog cleared)
-// Body: { saveToDb: false } → wipe CouchDB + peaksLog, everything back to 0
 app.post('/api/reset', async (req, res) => {
     const saveToDb = req.body?.saveToDb === true;
     console.log(`[reset] requested — saveToDb=${saveToDb}`);
-
     try {
         if (!saveToDb) {
-            // ── Truncate PostgreSQL tables ────────────────────────────────
             try {
                 await pool.query('TRUNCATE TABLE accelerometer_events, monitoring_data, realtime_data');
                 console.log('[reset] PostgreSQL tables truncated');
-            } catch (e) {
-                console.error('[reset] Failed to truncate tables:', e.message);
-            }
-
-            // Wipe JSON fallback file
+            } catch (e) { console.error('[reset] Failed to truncate tables:', e.message); }
             peaksLog = [];
             savePeaksLog(peaksLog);
             console.log('[reset] JSON fallback cleared');
         }
-
-        // Always broadcast zero stats to all clients
         const zeroStats = { total: 0, highSeverity: 0, medium: 0, low: 0, maxPeak: 0, avgPeak: 0, source: 'reset' };
         io.emit('stats-update', zeroStats);
         io.emit('display-reset', { saveToDb });
-
         console.log(`[reset] Complete — saveToDb=${saveToDb}`);
         res.json({ success: true, saveToDb, message: saveToDb ? 'Display reset — DB preserved' : 'Full reset — DB cleared' });
-
     } catch (e) {
         console.error('[reset] Error:', e);
         res.status(500).json({ success: false, error: e.message });
     }
 });
 
-// ── CSV Export endpoint ───────────────────────────────────────────────────
-// GET /api/test-report/csv?from=ISO&to=ISO
-// Exports every sensor window in the range as a paired S1+S2 CSV test report
+// ── Test-report CSV — now includes every registered sensor column set ─────
 app.get('/api/test-report/csv', async (req, res) => {
     const { from, to } = req.query;
     if (!from || !to) return res.status(400).send('from and to required');
@@ -1715,68 +1602,64 @@ app.get('/api/test-report/csv', async (req, res) => {
             FROM realtime_data rd
             LEFT JOIN LATERAL (
                 SELECT lat, lng, speed_kmh, total_distance_m
-                FROM rm_gps
-                WHERE timestamp <= rd.timestamp
-                ORDER BY timestamp DESC
-                LIMIT 1
+                FROM rm_gps WHERE timestamp <= rd.timestamp
+                ORDER BY timestamp DESC LIMIT 1
             ) g ON true
             WHERE rd.timestamp >= $1 AND rd.timestamp <= $2
             ORDER BY rd.timestamp ASC
         `, [new Date(from).toISOString(), new Date(to).toISOString()]);
 
-        // Pair S1 and S2 readings by index order
-        const left  = r.rows.filter(r => r.sensor === 'left');
-        const right = r.rows.filter(r => r.sensor === 'right');
-        const n     = Math.max(left.length, right.length);
+        const bySensor = {};
+        SENSOR_IDS.forEach(id => { bySensor[id] = r.rows.filter(row => row.sensor === id); });
+        const n = Math.max(...SENSOR_IDS.map(id => bySensor[id].length), 0);
 
         const fromDt  = new Date(from);
         const toDt    = new Date(to);
-        const durMs   = toDt - fromDt;
-        const durSec  = Math.round(durMs / 1000);
+        const durSec  = Math.round((toDt - fromDt) / 1000);
         const durStr  = `${Math.floor(durSec/60)}m ${durSec%60}s`;
 
         const lines = [];
-        // Report header block
         lines.push(`# UABAMS TEST RUN REPORT`);
         lines.push(`# Date,${fromDt.toLocaleDateString('en-IN')}`);
         lines.push(`# Start Time,${fromDt.toLocaleTimeString('en-IN')}`);
         lines.push(`# End Time,${toDt.toLocaleTimeString('en-IN')}`);
         lines.push(`# Duration,${durStr}`);
         lines.push(`# Total Windows,${n}`);
-        lines.push(`# S1 Readings,${left.length}`);
-        lines.push(`# S2 Readings,${right.length}`);
+        SENSORS.forEach(s => lines.push(`# ${s.label} Readings,${bySensor[s.id].length}`));
         lines.push('#');
 
-        // Column headers
-        lines.push([
-            'Window#','Timestamp',
-            'S1_Ax(g)','S1_Ay(g)','S1_Az(g)','S1_GForce(g)',
-            'S1_RMS_V','S1_RMS_L','S1_SD_V','S1_SD_L','S1_P2P_V','S1_P2P_L','S1_Peak(g)',
-            'S2_Ax(g)','S2_Ay(g)','S2_Az(g)','S2_GForce(g)',
-            'S2_RMS_V','S2_RMS_L','S2_SD_V','S2_SD_L','S2_P2P_V','S2_P2P_L','S2_Peak(g)',
-            'Lat','Lng','Speed_kmh','Distance_m'
-        ].join(','));
+        const header = ['Window#', 'Timestamp'];
+        SENSORS.forEach((s, i) => {
+            const tag = `S${i + 1}`;
+            header.push(
+                `${tag}_Ax(g)`, `${tag}_Ay(g)`, `${tag}_Az(g)`, `${tag}_GForce(g)`,
+                `${tag}_RMS_V`, `${tag}_RMS_L`, `${tag}_SD_V`, `${tag}_SD_L`,
+                `${tag}_P2P_V`, `${tag}_P2P_L`, `${tag}_Peak(g)`
+            );
+        });
+        header.push('Lat', 'Lng', 'Speed_kmh', 'Distance_m');
+        lines.push(header.join(','));
 
         const fmt  = (v, d=4) => v != null ? (+v).toFixed(d) : '';
         const fmt6 = (v)      => v != null ? (+v).toFixed(6) : '';
 
         for (let i = 0; i < n; i++) {
-            const l  = left[i]  || {};
-            const r2 = right[i] || {};
-            const ts = (l.timestamp || r2.timestamp || '').toString();
-            // GPS comes from whichever sensor row has it (prefer left)
-            const gps = l.lat != null ? l : r2;
-            lines.push([
-                i + 1,
-                ts,
-                fmt(l.x), fmt(l.y), fmt(l.z), fmt(l.g_force),
-                fmt(l.rms_v), fmt(l.rms_l), fmt(l.sd_v), fmt(l.sd_l),
-                fmt(l.p2p_v), fmt(l.p2p_l), fmt(l.peak),
-                fmt(r2.x), fmt(r2.y), fmt(r2.z), fmt(r2.g_force),
-                fmt(r2.rms_v), fmt(r2.rms_l), fmt(r2.sd_v), fmt(r2.sd_l),
-                fmt(r2.p2p_v), fmt(r2.p2p_l), fmt(r2.peak),
-                fmt6(gps.lat), fmt6(gps.lng), fmt(gps.speed_kmh, 2), fmt(gps.total_distance_m, 1)
-            ].join(','));
+            const row = [i + 1];
+            let ts = '', gps = null;
+            SENSORS.forEach(s => {
+                const rec = bySensor[s.id][i] || {};
+                if (!ts && rec.timestamp) ts = rec.timestamp.toString();
+                if (!gps && rec.lat != null) gps = rec;
+                row.push(
+                    fmt(rec.x), fmt(rec.y), fmt(rec.z), fmt(rec.g_force),
+                    fmt(rec.rms_v), fmt(rec.rms_l), fmt(rec.sd_v), fmt(rec.sd_l),
+                    fmt(rec.p2p_v), fmt(rec.p2p_l), fmt(rec.peak)
+                );
+            });
+            row.splice(1, 0, ts); // insert timestamp after Window#
+            gps = gps || {};
+            row.push(fmt6(gps.lat), fmt6(gps.lng), fmt(gps.speed_kmh, 2), fmt(gps.total_distance_m, 1));
+            lines.push(row.join(','));
         }
 
         const filename = `test_report_${fromDt.toISOString().slice(0,10)}_${fromDt.toTimeString().slice(0,8).replace(/:/g,'-')}.csv`;
@@ -1789,9 +1672,7 @@ app.get('/api/test-report/csv', async (req, res) => {
     }
 });
 
-// GET /api/impacts/export/csv?hours=24
-// Returns a properly formatted CSV matching the impact_report.csv structure
-// Columns: timestamp,sensor,severity,peak_g,rmsV,rmsL,sdV,sdL,p2pV,p2pL,x,y,z,fs,window_ms
+// ── Impacts CSV export — unchanged, already sensor-agnostic ────────────────
 app.get('/api/impacts/export/csv', async (req, res) => {
     const { from, to, hours } = req.query;
 
@@ -1810,112 +1691,84 @@ app.get('/api/impacts/export/csv', async (req, res) => {
     }
 
     let docs = [];
-
-    // Try PostgreSQL first
     if (pgReady) {
         try {
-            const r = await pool.query(`
-                SELECT * FROM accelerometer_events
-                ${where}
-                ORDER BY timestamp DESC
-            `, params);
+            const r = await pool.query(`SELECT * FROM accelerometer_events ${where} ORDER BY timestamp DESC`, params);
             docs = r.rows.map(normImpact);
-        } catch (e) {
-            console.error('[csv] PG read failed, using JSON fallback:', e.message);
-        }
+        } catch (e) { console.error('[csv] PG read failed, using JSON fallback:', e.message); }
     }
-
-    // Fallback to peaks_log.json
     if (!docs.length && !where.includes('$2')) {
-        docs = peaksLog
-            .filter(p => p.timestamp >= params[0])
-            .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+        docs = peaksLog.filter(p => p.timestamp >= params[0]).sort((a, b) => b.timestamp.localeCompare(a.timestamp));
     }
 
     console.log(`[csv] Exporting ${docs.length} records (${label})`);
 
-    // Build CSV
-    const headers = [
-        'timestamp', 'sensor', 'severity', 'p_class',
-        'peak_g', 'rmsV', 'rmsL', 'sdV', 'sdL', 'p2pV', 'p2pL',
-        'x', 'y', 'z', 'fs', 'window_ms', 'distance_m',
-        'lat', 'lng'
-    ];
-
+    const headers = ['timestamp', 'sensor', 'severity', 'p_class', 'peak_g', 'rmsV', 'rmsL', 'sdV', 'sdL', 'p2pV', 'p2pL', 'x', 'y', 'z', 'fs', 'window_ms', 'distance_m', 'lat', 'lng'];
     const fmt = v => (v == null || v === undefined) ? '' : String(v);
-
     const rows = docs.map(d => [
-        fmt(d.timestamp),
-        fmt(d.sensor),
-        fmt(d.severity),
-        fmt(d.p_class   || getPClass(d.peak_g) || ''),
-        fmt(d.peak_g    != null ? (+d.peak_g).toFixed(6)  : ''),
-        fmt(d.rmsV      != null ? (+d.rmsV).toFixed(3)    : ''),
-        fmt(d.rmsL      != null ? (+d.rmsL).toFixed(3)    : ''),
-        fmt(d.sdV       != null ? (+d.sdV).toFixed(3)     : ''),
-        fmt(d.sdL       != null ? (+d.sdL).toFixed(3)     : ''),
-        fmt(d.p2pV      != null ? (+d.p2pV).toFixed(3)    : ''),
-        fmt(d.p2pL      != null ? (+d.p2pL).toFixed(3)    : ''),
-        fmt(d.x         != null ? (+d.x).toFixed(3)       : ''),
-        fmt(d.y         != null ? (+d.y).toFixed(3)       : ''),
-        fmt(d.z         != null ? (+d.z).toFixed(3)       : ''),
-        fmt(d.fs        != null ? d.fs                     : ''),
-        fmt(d.window_ms != null ? d.window_ms              : ''),
-        fmt(d.distance_m != null ? d.distance_m            : '0'),
-        fmt(d.lat       != null ? (+d.lat).toFixed(6)      : ''),
-        fmt(d.lng       != null ? (+d.lng).toFixed(6)      : '')
+        fmt(d.timestamp), fmt(d.sensor), fmt(d.severity),
+        // ★ PIVOT CHANGE — pass d.sensor so a fallback classification (when
+        // p_class wasn't stored) uses the right threshold set for pivot rows
+        fmt(d.p_class || getPClass(d.peak_g, d.sensor) || ''),
+        fmt(d.peak_g != null ? (+d.peak_g).toFixed(6) : ''),
+        fmt(d.rmsV != null ? (+d.rmsV).toFixed(3) : ''), fmt(d.rmsL != null ? (+d.rmsL).toFixed(3) : ''),
+        fmt(d.sdV != null ? (+d.sdV).toFixed(3) : ''), fmt(d.sdL != null ? (+d.sdL).toFixed(3) : ''),
+        fmt(d.p2pV != null ? (+d.p2pV).toFixed(3) : ''), fmt(d.p2pL != null ? (+d.p2pL).toFixed(3) : ''),
+        fmt(d.x != null ? (+d.x).toFixed(3) : ''), fmt(d.y != null ? (+d.y).toFixed(3) : ''), fmt(d.z != null ? (+d.z).toFixed(3) : ''),
+        fmt(d.fs != null ? d.fs : ''), fmt(d.window_ms != null ? d.window_ms : ''),
+        fmt(d.distance_m != null ? d.distance_m : '0'),
+        fmt(d.lat != null ? (+d.lat).toFixed(6) : ''), fmt(d.lng != null ? (+d.lng).toFixed(6) : '')
     ].join(','));
 
     const csv = [headers.join(','), ...rows].join('\n');
-
     const filename = `impact_report_${label}.csv`;
-
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Cache-Control', 'no-cache');
     res.send(csv);
 });
 
-// ── ODR config endpoints ──────────────────────────────────────────────────
-// GET /api/odr-config
-// Returns the current ODR setting for both accelerometers.
-app.get('/api/odr-config', (req, res) => {
-    res.json(odrConfig);
-});
+// ── ODR config endpoints — now generic over SENSORS registry ──────────────
+app.get('/api/odr-config', (req, res) => res.json(odrConfig));
 
-// POST /api/odr-config  body: { accel1: 100, accel2: 50 }
-// Updates ODR and resets counters so the next sample is always accepted.
-// Broadcasts 'odr-config-changed' to all connected clients.
 app.post('/api/odr-config', (req, res) => {
-    const { accel1, accel2 } = req.body;
     const valid = [50, 100, 200];
-    if (!valid.includes(Number(accel1)) || !valid.includes(Number(accel2))) {
-        return res.status(400).json({ error: 'ODR must be 50, 100, or 200 Hz' });
+    const body  = req.body || {};
+    const updated = {};
+
+    for (const s of SENSORS) {
+        if (body[s.odrKey] !== undefined) {
+            if (!valid.includes(Number(body[s.odrKey]))) {
+                return res.status(400).json({ error: `${s.odrKey} ODR must be 50, 100, or 200 Hz` });
+            }
+            updated[s.odrKey] = Number(body[s.odrKey]);
+        }
     }
-    odrConfig.accel1   = Number(accel1);
-    odrConfig.accel2   = Number(accel2);
-    odrCounters.accel1 = 0;   // reset so next sample is always accepted
-    odrCounters.accel2 = 0;
-    console.log(`[ODR] Updated → accel1=${odrConfig.accel1}Hz  accel2=${odrConfig.accel2}Hz`);
-    io.emit('odr-config-changed', odrConfig);   // notify all open pages
+    if (!Object.keys(updated).length) {
+        return res.status(400).json({ error: 'No valid sensor ODR keys provided' });
+    }
+
+    Object.assign(odrConfig, updated);
+    SENSORS.forEach(s => { odrCounters[s.id] = 0; }); // reset all so next sample is accepted
+    console.log('[ODR] Updated →', odrConfig);
+    io.emit('odr-config-changed', odrConfig);
     res.json({ success: true, odrConfig });
 });
 
-// ── Limits config endpoints ───────────────────────────────────────────────
-// GET /api/limits-config
-// Returns the current UML and Limit Class configuration.
-app.get('/api/limits-config', (req, res) => {
-    res.json(limitsConfig);
-});
+// ── Limits config endpoints (unchanged) ─────────────────────────────────
+app.get('/api/limits-config', (req, res) => res.json(limitsConfig));
 
-// POST /api/limits-config  body: { uml: {...}, limitClass: {...} }
-// Saves UML and Limit Class values to memory + disk and notifies all pages.
 app.post('/api/limits-config', (req, res) => {
     const { uml, limitClass } = req.body;
     limitsConfig.uml        = uml        ?? null;
     limitsConfig.limitClass = limitClass ?? null;
     saveLimitsConfig(limitsConfig);
     console.log('[limits] Config updated and saved to limits_config.json');
-    io.emit('limits-config-changed', limitsConfig);   // notify all open pages
+    io.emit('limits-config-changed', limitsConfig);
     res.json({ success: true, limitsConfig });
+});
+
+// ── GET /api/sensors — new: lets frontend discover registered sensors dynamically
+app.get('/api/sensors', (req, res) => {
+    res.json(SENSORS.map(s => ({ id: s.id, label: s.label, odrKey: s.odrKey, healthKey: s.healthKey })));
 });

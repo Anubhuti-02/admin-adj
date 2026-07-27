@@ -50,16 +50,15 @@ const SENSORS = [
         mqttTopic:   'adj/datalogger/sensors/pivot',
         topicMatch:  t => t.includes('pivot'),
     },
-    // ── To add a 4th sensor in the future, uncomment/copy this block: ──────
-    // {
-    //     id:          'aux',
-    //     label:       'Auxiliary (S4)',
-    //     packetType:  0x05,
-    //     healthKey:   'adxl345_s4',
-    //     odrKey:      'accel4',
-    //     mqttTopic:   'adj/datalogger/sensors/aux',
-    //     topicMatch:  t => t.includes('aux'),
-    // },
+    {
+        id:          'aux',
+        label:       'Auxiliary (S4)',
+        packetType:  0x05,
+        healthKey:   'adxl345_s4',
+        odrKey:      'accel4',
+        mqttTopic:   'adj/datalogger/sensors/aux',
+        topicMatch:  t => t.includes('aux'),
+    },
 ];
 
 const SENSOR_IDS = SENSORS.map(s => s.id);                                   // ['left','right','pivot']
@@ -1460,6 +1459,39 @@ const GPS_BOARD_IP = process.env.GPS_BOARD_IP || '192.168.1.200';
 const PKT_SIZE     = 14;
 const SYNC0 = 0xAA, SYNC1 = 0x55;
 
+// ═════════════════════════════════════════════════════════════════════════
+// ── Raw-accel TCP ingestion (left/right/pivot hardware, new simplified
+// packet format) — same multiplexed-TCP pattern as the GPS board above,
+// disambiguated by its own SYNC marker (0xAB 0x56 vs GPS's 0xAA 0x55).
+// Unlike the old firmware (packetType 0x01/0x02/0x04 in SENSORS[] above),
+// these boards only send raw X/Y/Z per sample — RMS/SD/P2P/Peak/fs are
+// computed here in software from a rolling window of samples.
+// ═════════════════════════════════════════════════════════════════════════
+// IP -> sensor id. Confirmed against the hardware team's reference receiver
+// (tcp_binary_server1.py running on adjserver) — note .202 is NOT used,
+// ACCEL-2 is .203. These 4 boards are assumed to replace the old left/right
+// hardware (not run concurrently with it) — see the packetType 0x01/0x02
+// MQTT path above, which is left in place but will collide on the same
+// device_id if that old hardware is ever reconnected.
+const ACCEL_SENSOR_IPS = {
+    '192.168.1.201': 'left',   // ACCEL-1
+    '192.168.1.203': 'right',  // ACCEL-2 (.202 is not used)
+    '192.168.1.204': 'pivot',  // ACCEL-3
+    '192.168.1.205': 'aux',    // ACCEL-4
+};
+const ACCEL_PKT_SIZE  = 16;
+const ACCEL_SYNC0 = 0xAB, ACCEL_SYNC1 = 0x56;
+const ACCEL_WINDOW_MS = 1000; // stats computed once per this many ms, per sensor
+
+// Which axis is "vertical" vs "lateral" per sensor — physical mounting isn't
+// finalized yet, change here once it is, nothing else needs to change.
+const ACCEL_AXIS_MAP = {
+    left:  { vertical: 'z', lateral: 'x' },
+    right: { vertical: 'z', lateral: 'x' },
+    pivot: { vertical: 'z', lateral: 'x' },
+    aux:   { vertical: 'z', lateral: 'x' },
+};
+
 function crc16Ccitt(buf) {
     let crc = 0xFFFF;
     for (const b of buf) {
@@ -1530,6 +1562,178 @@ function handleGpsSocket(socket, firstChunk) {
     socket.on('error', e  => console.log(`[GPS-TCP] error: ${e.message}`));
 }
 
+// ── Per-connection windowed stats accumulator for the raw-accel boards ─────
+class AccelWindow {
+    constructor(sensorId) {
+        this.sensorId = sensorId;
+        const axes = ACCEL_AXIS_MAP[sensorId] || { vertical: 'z', lateral: 'x' };
+        this.verticalAxis = axes.vertical;
+        this.lateralAxis  = axes.lateral;
+        this.samples = []; // { x, y, z }
+        this.windowStart = Date.now();
+    }
+    add(x, y, z) { this.samples.push({ x, y, z }); }
+    ready() { return this.samples.length > 0 && (Date.now() - this.windowStart) >= ACCEL_WINDOW_MS; }
+    computeAndReset() {
+        const elapsedS = Math.max((Date.now() - this.windowStart) / 1000, 1e-6);
+        const samples  = this.samples;
+        const last     = samples[samples.length - 1];
+        const vert = samples.map(s => s[this.verticalAxis]);
+        const lat  = samples.map(s => s[this.lateralAxis]);
+        const magnitudes = samples.map(s => Math.sqrt(s.x**2 + s.y**2 + s.z**2));
+        const rms = vals => Math.sqrt(vals.reduce((a, v) => a + v * v, 0) / vals.length);
+        const sd  = vals => {
+            if (vals.length < 2) return 0;
+            const mean = vals.reduce((a, v) => a + v, 0) / vals.length;
+            return Math.sqrt(vals.reduce((a, v) => a + (v - mean) ** 2, 0) / vals.length);
+        };
+        const stats = {
+            x: last.x, y: last.y, z: last.z,
+            gForce: Math.sqrt(last.x**2 + last.y**2 + last.z**2),
+            rmsV: rms(vert), rmsL: rms(lat),
+            sdV: sd(vert),   sdL: sd(lat),
+            p2pV: Math.max(...vert) - Math.min(...vert),
+            p2pL: Math.max(...lat)  - Math.min(...lat),
+            peak: Math.max(...magnitudes),
+            fs: samples.length / elapsedS,
+            windowMs: ACCEL_WINDOW_MS,
+        };
+        this.samples = [];
+        this.windowStart = Date.now();
+        return stats;
+    }
+}
+
+// ── Shared helper: process one raw-accel window's computed stats ───────────
+// Mirrors handleBinarySensorPacket's generic tail (health/DB/impact/broadcast)
+// but skips GPS handling — these boards don't carry GPS, that's the separate
+// GPS-TCP path above.
+async function processRawAccelReading(sensorMeta, stats, timestamp) {
+    const sensorId = sensorMeta.id;
+    const { x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, fs, windowMs } = stats;
+
+    sensorLastSeen[sensorId] = Date.now();
+
+    const now = Date.now();
+    const inferredHealth = Object.assign({}, lastHealthStatus || {}, {
+        w5500: 'OK', phyLink: 'OK', tcp: 'OK', spi1: 'OK', usart2: 'OK',
+    });
+    SENSORS.forEach(s => {
+        inferredHealth[s.healthKey] = (now - sensorLastSeen[s.id]) < SENSOR_TIMEOUT_MS ? 'OK' : 'FAIL';
+    });
+    lastHealthStatus = inferredHealth;
+    io.emit('system-health', inferredHealth);
+
+    if (pgReady) {
+        pool.query(
+            `INSERT INTO monitoring_data
+             (timestamp, type, device_id, x_axis, y_axis, z_axis, g_force, rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l, peak, fs, window_ms)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+            [timestamp, 'accelerometer', sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, fs, windowMs]
+        ).catch(e => console.error('monitoring_data insert:', e.message));
+
+        pool.query(
+            `INSERT INTO realtime_data
+             (timestamp, sensor, x, y, z, g_force, rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l, peak)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+            [timestamp, sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak]
+        ).catch(e => console.error('realtime_data insert:', e.message));
+    }
+
+    const peakVal = peak || gForce;
+    if (peakVal > 2) {
+        const pClass   = getPClass(peakVal, sensorId);
+        const severity = getSeverity(peakVal, sensorId);
+        const impact   = {
+            timestamp, sensor: sensorId, severity, peak_g: peakVal, gForce,
+            rmsV, rmsL, sdV, sdL, p2pV, p2pL, x, y, z, fs, window_ms: windowMs,
+            distance_m: totalDistanceM, p_class: pClass
+        };
+        peaksLog.push(impact);
+        savePeaksLog(peaksLog);
+        if (pgReady) {
+            const hasGpsFix = lastGpsCoord?.lat && lastGpsCoord?.lng;
+            pool.query(
+                `INSERT INTO accelerometer_events
+                 (timestamp, sensor, severity, peak_g, g_force,
+                  rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l,
+                  x, y, z, fs, window_ms, distance_m, p_class, lat, lng)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+                [timestamp, sensorId, severity, peakVal, gForce,
+                 rmsV, rmsL, sdV, sdL, p2pV, p2pL,
+                 x, y, z, fs, windowMs, totalDistanceM, pClass,
+                 hasGpsFix ? lastGpsCoord.lat : null,
+                 hasGpsFix ? lastGpsCoord.lng : null]
+            ).catch(e => console.error('events insert:', e.message));
+        }
+        io.emit('new-impact', impact);
+        console.log(`IMPACT: ${peakVal.toFixed(3)}g (${severity}) on ${sensorId}`);
+        computeStats(24).then(s => io.emit('stats-update', s)).catch(() => {});
+    }
+
+    if (shouldEmit(sensorId)) {
+        io.emit('accelerometer-data', { sensor: sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, timestamp });
+    } else {
+        console.log(`[ODR] Dropped: ${sensorId} @ ${odrConfig[sensorMeta.odrKey]}Hz`);
+    }
+}
+
+function handleAccelSocket(socket, firstChunk) {
+    const remoteIP  = (socket.remoteAddress || '').replace('::ffff:', '');
+    const sensorId  = ACCEL_SENSOR_IPS[remoteIP];
+    if (!sensorId) {
+        console.log(`[ACCEL-TCP] rejected conn from ${remoteIP} (not a known accel sensor IP)`);
+        socket.destroy();
+        return;
+    }
+    const sensorMeta = sensorById(sensorId);
+    console.log(`[ACCEL-TCP] ${sensorId} accel board connected from ${remoteIP}`);
+
+    let rxBuf = Buffer.from(firstChunk);
+    const window = new AccelWindow(sensorId);
+
+    function drain() {
+        while (rxBuf.length >= ACCEL_PKT_SIZE) {
+            let si = -1;
+            for (let i = 0; i <= rxBuf.length - ACCEL_PKT_SIZE; i++) {
+                if (rxBuf[i] === ACCEL_SYNC0 && rxBuf[i + 1] === ACCEL_SYNC1) { si = i; break; }
+            }
+            if (si === -1) { rxBuf = rxBuf.slice(rxBuf.length - 1); break; }
+            if (si > 0)    rxBuf = rxBuf.slice(si);
+            if (rxBuf.length < ACCEL_PKT_SIZE) break;
+
+            const pkt     = rxBuf.slice(0, ACCEL_PKT_SIZE);
+            const crcCalc = crc16Ccitt(pkt.slice(2, 14));
+            const crcPkt  = pkt.readUInt16BE(14);
+            if (crcCalc !== crcPkt) {
+                console.log(`[ACCEL-TCP] ${sensorId}: CRC mismatch — resyncing`);
+                rxBuf = rxBuf.slice(1);
+                continue;
+            }
+            window.add(
+                pkt.readInt32BE(2)  / 1_000_000,
+                pkt.readInt32BE(6)  / 1_000_000,
+                pkt.readInt32BE(10) / 1_000_000
+            );
+            rxBuf = rxBuf.slice(ACCEL_PKT_SIZE);
+        }
+    }
+
+    const flushTimer = setInterval(() => {
+        if (window.ready()) {
+            const stats = window.computeAndReset();
+            const timestamp = getTimezoneTimestamp();
+            console.log(`[ACCEL-TCP] [${sensorId}] x=${stats.x.toFixed(4)} y=${stats.y.toFixed(4)} z=${stats.z.toFixed(4)} gForce=${stats.gForce.toFixed(4)} peak=${stats.peak.toFixed(4)} rmsV=${stats.rmsV.toFixed(4)} rmsL=${stats.rmsL.toFixed(4)} fs=${stats.fs.toFixed(1)}Hz`);
+            processRawAccelReading(sensorMeta, stats, timestamp).catch(e => console.error(`processRawAccelReading (${sensorId}):`, e.message));
+        }
+    }, 100);
+
+    drain();
+    socket.on('data', chunk => { rxBuf = Buffer.concat([rxBuf, chunk]); drain(); });
+    socket.on('close', () => { clearInterval(flushTimer); console.log(`[ACCEL-TCP] ${sensorId} board disconnected`); });
+    socket.on('error', e  => console.log(`[ACCEL-TCP] ${sensorId} error: ${e.message}`));
+}
+
 const tcpMux = net.createServer(rawSocket => {
     let routed = false;
     const timeout = setTimeout(() => {
@@ -1544,6 +1748,8 @@ const tcpMux = net.createServer(rawSocket => {
         routed = true;
         if (firstChunk[0] === SYNC0) {
             handleGpsSocket(rawSocket, firstChunk);
+        } else if (firstChunk[0] === ACCEL_SYNC0) {
+            handleAccelSocket(rawSocket, firstChunk);
         } else {
             server.emit('connection', rawSocket);
             rawSocket.unshift(firstChunk);

@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Route Settings - Datalogger</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="../css/common.css">
+    <link rel="stylesheet" href="../css/pages/configuration.css">
+</head>
+<body>
+    <div class="container">
+        <div class="config-card">
+            <h1>Route Settings</h1>
+            <p class="subtitle">Set the origin and destination stations for this deployment — every generated report filename will be tagged with this route</p>
+
+            <!-- Current Configuration Display -->
+            <div class="current-config" id="currentConfig">
+                <h4><i class="fas fa-check-circle"></i> Current Active Route</h4>
+                <div class="config-badges" id="routeBadges">
+                    <!-- Populated by JavaScript -->
+                </div>
+            </div>
+
+            <!-- Route Section -->
+            <div class="threshold-section">
+                <div class="section-title">
+                    <i class="fas fa-route"></i>
+                    <h2>Route</h2>
+                </div>
+
+                <div class="threshold-input">
+                    <label>Origin Station Code</label>
+                    <input type="text" id="originCode" placeholder="e.g. NDLS" maxlength="10">
+                </div>
+                <div class="threshold-input">
+                    <label>Destination Station Code</label>
+                    <input type="text" id="destinationCode" placeholder="e.g. LJN" maxlength="10">
+                </div>
+            </div>
+
+            <!-- Validation Error -->
+            <div id="validationError" class="validation-error">
+                <i class="fas fa-exclamation-triangle"></i> <span></span>
+            </div>
+
+            <!-- Save Buttons -->
+            <div class="save-section">
+                <button class="btn btn-secondary" onclick="clearRoute()">
+                    <i class="fas fa-undo"></i> Clear Route
+                </button>
+                <button class="btn btn-primary" onclick="saveRouteConfig()">
+                    <i class="fas fa-save"></i> Save Route
+                </button>
+            </div>
+
+            <!-- Success Message -->
+            <div id="successMessage" class="success-message">
+                <i class="fas fa-check-circle"></i> Route saved — new reports will be tagged with this route.
+            </div>
+        </div>
+    </div>
+
+    <script src="../js/common.js"></script>
+    <script src="../js/pages/route-settings.js"></script>
+</body>
+</html>

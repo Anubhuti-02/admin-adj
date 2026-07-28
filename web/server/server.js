@@ -126,6 +126,26 @@ function saveLimitsConfig(cfg) {
 let limitsConfig = loadLimitsConfig();
 console.log('[limits] Config loaded:', JSON.stringify(limitsConfig));
 
+const ROUTE_CONFIG_FILE = path.join(__dirname, 'route_config.json');
+function loadRouteConfig() {
+    try {
+        if (fs.existsSync(ROUTE_CONFIG_FILE)) return JSON.parse(fs.readFileSync(ROUTE_CONFIG_FILE, 'utf8'));
+    } catch (e) { console.error('route_config.json read error:', e.message); }
+    return { origin: null, destination: null };
+}
+function saveRouteConfig(cfg) {
+    try { fs.writeFileSync(ROUTE_CONFIG_FILE, JSON.stringify(cfg, null, 2)); }
+    catch (e) { console.error('route_config.json write error:', e.message); }
+}
+let routeConfig = loadRouteConfig();
+console.log('[route] Config loaded:', JSON.stringify(routeConfig));
+
+// Builds the "NDLS-LJN_" prefix (or "" if unset) — used by every report filename site
+function routePrefix() {
+    if (!routeConfig.origin || !routeConfig.destination) return '';
+    return `${routeConfig.origin}-${routeConfig.destination}_`;
+}
+
 // ── Report archival — on-demand export archives + continuous raw log ──────
 const REPORTS_DIR         = path.join(__dirname, 'reports');
 const IMPACT_REPORTS_DIR  = path.join(REPORTS_DIR, 'impact_events');
@@ -149,7 +169,7 @@ const RAW_LOG_HEADER = 'timestamp,sensor,x,y,z,gForce,rmsV,rmsL,sdV,sdL,p2pV,p2p
 function appendRawLog(sensorId, row) {
     try {
         const dateStr = getTimezoneTimestamp().slice(0, 10); // "YYYY-MM-DD"
-        const file = path.join(RAW_LOG_DIR, `${sensorId}_${dateStr}.csv`);
+        const file = path.join(RAW_LOG_DIR, `${routePrefix()}${sensorId}_${dateStr}.csv`);
         const isNew = !fs.existsSync(file);
         const line = [row.timestamp, row.sensor, row.x, row.y, row.z, row.gForce,
                        row.rmsV, row.rmsL, row.sdV, row.sdL, row.p2pV, row.p2pL,
@@ -1902,7 +1922,7 @@ app.get('/api/test-report/csv', async (req, res) => {
             lines.push(row.join(','));
         }
 
-        const filename = `test_report_${fromDt.toISOString().slice(0,10)}_${fromDt.toTimeString().slice(0,8).replace(/:/g,'-')}.csv`;
+        const filename = `${routePrefix()}test_report_${fromDt.toISOString().slice(0,10)}_${fromDt.toTimeString().slice(0,8).replace(/:/g,'-')}.csv`;
         const csvBody  = lines.join('\r\n');
 
         const archiveName = filename.replace(/\.csv$/, `_${archiveTimestamp()}.csv`);
@@ -1969,7 +1989,7 @@ app.get('/api/impacts/export/csv', async (req, res) => {
     ].join(','));
 
     const csv = [headers.join(','), ...rows].join('\n');
-    const filename = `impact_report_${label}.csv`;
+    const filename = `${routePrefix()}impact_report_${label}.csv`;
 
     const archiveName = filename.replace(/\.csv$/, `_${archiveTimestamp()}.csv`);
     try {
@@ -1990,7 +2010,7 @@ app.post('/api/reports/km-wise', express.json({ limit: '15mb' }), (req, res) => 
         return res.status(400).json({ success: false, error: 'csv (string) required' });
     }
     const safeDate = (reportDate || new Date().toISOString().slice(0, 10)).replace(/[^0-9-]/g, '');
-    const archiveName = `KM_Report_${safeDate}_${archiveTimestamp()}.csv`;
+    const archiveName = `${routePrefix()}KM_Report_${safeDate}_${archiveTimestamp()}.csv`;
     try {
         fs.writeFileSync(path.join(KMWISE_REPORTS_DIR, archiveName), csv);
         console.log(`[reports] Archived to ${archiveName}`);
@@ -2039,6 +2059,19 @@ app.post('/api/limits-config', (req, res) => {
     console.log('[limits] Config updated and saved to limits_config.json');
     io.emit('limits-config-changed', limitsConfig);
     res.json({ success: true, limitsConfig });
+});
+
+// ── Route config endpoints — global origin/destination, prefixed onto every report filename ──
+app.get('/api/route-config', (req, res) => res.json(routeConfig));
+
+app.post('/api/route-config', (req, res) => {
+    const { origin, destination } = req.body;
+    routeConfig.origin      = (origin || '').trim().toUpperCase() || null;
+    routeConfig.destination = (destination || '').trim().toUpperCase() || null;
+    saveRouteConfig(routeConfig);
+    console.log('[route] Config updated and saved to route_config.json');
+    io.emit('route-config-changed', routeConfig);
+    res.json({ success: true, routeConfig });
 });
 
 // ── GET /api/sensors — new: lets frontend discover registered sensors dynamically

@@ -1,7 +1,8 @@
 /* route-settings.js
- * Global origin/destination route setting → /api/route-config
- * Prefixed onto every server-generated report filename (impact/test-run/
- * KM-wise archives + the continuous per-sensor raw_log files).
+ * Global origin/destination route → /api/route-config
+ * Global section metadata (Railway/Division/Section/Line/Block/Rail LH-RH) → /api/section-config
+ * Both are prefixed/written onto every server-generated report filename and
+ * raw_log row.
  */
 
 function displayRouteBadges(cfg) {
@@ -10,6 +11,15 @@ function displayRouteBadges(cfg) {
     badges.innerHTML = (cfg && cfg.origin && cfg.destination)
         ? `<div class="config-badge-item">${cfg.origin} → ${cfg.destination}</div>`
         : `<div class="config-badge-item" style="color:#94a3b8;">No route configured yet — enter station codes and save.</div>`;
+}
+
+function displaySectionBadges(cfg) {
+    const badges = document.getElementById('sectionBadges');
+    if (!badges) return;
+    const parts = cfg ? [cfg.railway, cfg.division, cfg.section, cfg.line].filter(Boolean) : [];
+    badges.innerHTML = parts.length
+        ? `<div class="config-badge-item">${parts.join(' / ')}</div>`
+        : `<div class="config-badge-item" style="color:#94a3b8;">No section metadata configured yet.</div>`;
 }
 
 async function loadRouteConfig() {
@@ -26,20 +36,59 @@ async function loadRouteConfig() {
     }
 }
 
-async function saveRouteConfig() {
+async function loadSectionConfig() {
+    try {
+        const res = await fetch('/api/section-config');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const cfg = await res.json();
+        document.getElementById('railwayName').value = cfg.railway || '';
+        document.getElementById('divisionCode').value = cfg.divisionCode || '';
+        document.getElementById('divisionName').value = cfg.division || '';
+        document.getElementById('sectionCode').value = cfg.section || '';
+        document.getElementById('lineCode').value = cfg.line || '';
+        document.getElementById('blockCode').value = cfg.block || '';
+        document.getElementById('railLH').value = cfg.railLH || '';
+        document.getElementById('railRH').value = cfg.railRH || '';
+        displaySectionBadges(cfg);
+    } catch (e) {
+        console.warn('[section] Could not load config:', e.message);
+        showError('Could not load section metadata from server. Is the server running?');
+    }
+}
+
+async function saveAllConfig() {
     const origin = document.getElementById('originCode').value;
     const destination = document.getElementById('destinationCode').value;
+    const railway = document.getElementById('railwayName').value;
+    const divisionCode = document.getElementById('divisionCode').value;
+    const division = document.getElementById('divisionName').value;
+    const section = document.getElementById('sectionCode').value;
+    const line = document.getElementById('lineCode').value;
+    const block = document.getElementById('blockCode').value;
+    const railLH = document.getElementById('railLH').value;
+    const railRH = document.getElementById('railRH').value;
+
     try {
-        const res = await fetch('/api/route-config', {
+        const routeRes = await fetch('/api/route-config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ origin, destination })
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        document.getElementById('originCode').value = data.routeConfig.origin || '';
-        document.getElementById('destinationCode').value = data.routeConfig.destination || '';
-        displayRouteBadges(data.routeConfig);
+        if (!routeRes.ok) throw new Error(`HTTP ${routeRes.status}`);
+        const routeData = await routeRes.json();
+        document.getElementById('originCode').value = routeData.routeConfig.origin || '';
+        document.getElementById('destinationCode').value = routeData.routeConfig.destination || '';
+        displayRouteBadges(routeData.routeConfig);
+
+        const sectionRes = await fetch('/api/section-config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ railway, divisionCode, division, section, line, block, railLH, railRH })
+        });
+        if (!sectionRes.ok) throw new Error(`HTTP ${sectionRes.status}`);
+        const sectionData = await sectionRes.json();
+        displaySectionBadges(sectionData.sectionConfig);
+
         hideError();
         const msg = document.getElementById('successMessage');
         if (msg) { msg.style.display = 'flex'; setTimeout(() => msg.style.display = 'none', 4000); }
@@ -48,10 +97,12 @@ async function saveRouteConfig() {
     }
 }
 
-async function clearRoute() {
-    document.getElementById('originCode').value = '';
-    document.getElementById('destinationCode').value = '';
-    await saveRouteConfig();
+async function clearAll() {
+    ['originCode', 'destinationCode', 'railwayName', 'divisionCode', 'divisionName',
+     'sectionCode', 'lineCode', 'blockCode', 'railLH', 'railRH'].forEach(id => {
+        document.getElementById(id).value = '';
+    });
+    await saveAllConfig();
 }
 
 // ── Error display ──────────────────────────────────────────────────────────
@@ -67,8 +118,9 @@ function hideError() {
 }
 
 // ── Expose to HTML onclick handlers ─────────────────────────────────────────
-window.saveRouteConfig = saveRouteConfig;
-window.clearRoute      = clearRoute;
+window.saveAllConfig = saveAllConfig;
+window.clearAll      = clearAll;
 
 // ── Start ────────────────────────────────────────────────────────────────
 loadRouteConfig();
+loadSectionConfig();

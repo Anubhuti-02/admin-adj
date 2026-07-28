@@ -129,7 +129,7 @@ function computePeakDist(docs) {
     };
     for (const d of docs) {
         const side = d.device_id === 'right' ? 'right' : (d.device_id === 'pivot' ? 'pivot' : 'left');
-        const pV = getPClass(d.z_axis, getLCPeakThresholds(side, 'V'));
+        const pV = getPClass(d.y_axis, getLCPeakThresholds(side, 'V'));
         const pL = getPClass(d.x_axis, getLCPeakThresholds(side, 'L'));
         if (pV) out[side].V[pV]++;
         if (pL) out[side].L[pL]++;
@@ -141,7 +141,7 @@ function computeWorstPeaks(docs) {
     const b = { 'L-LAT': [], 'L-VERT': [], 'R-LAT': [], 'R-VERT': [], 'P-LAT': [], 'P-VERT': [] };
     for (const d of docs) {
         const side = d.device_id === 'right' ? 'right' : (d.device_id === 'pivot' ? 'pivot' : 'left');
-        const vert = d.z_axis != null ? Math.abs(d.z_axis) : null;
+        const vert = d.y_axis != null ? Math.abs(d.y_axis) : null;
         const lat  = d.x_axis != null ? Math.abs(d.x_axis) : null;
         if (side === 'left') {
             if (vert != null) b['L-VERT'].push(vert);

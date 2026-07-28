@@ -146,6 +146,20 @@ function routePrefix() {
     return `${routeConfig.origin}-${routeConfig.destination}_`;
 }
 
+const SECTION_CONFIG_FILE = path.join(__dirname, 'section_config.json');
+function loadSectionConfig() {
+    try {
+        if (fs.existsSync(SECTION_CONFIG_FILE)) return JSON.parse(fs.readFileSync(SECTION_CONFIG_FILE, 'utf8'));
+    } catch (e) { console.error('section_config.json read error:', e.message); }
+    return { railway: null, divisionCode: null, division: null, section: null, line: null, block: null, railLH: null, railRH: null };
+}
+function saveSectionConfig(cfg) {
+    try { fs.writeFileSync(SECTION_CONFIG_FILE, JSON.stringify(cfg, null, 2)); }
+    catch (e) { console.error('section_config.json write error:', e.message); }
+}
+let sectionConfig = loadSectionConfig();
+console.log('[section] Config loaded:', JSON.stringify(sectionConfig));
+
 // ── Report archival — on-demand export archives + continuous raw log ──────
 const REPORTS_DIR         = path.join(__dirname, 'reports');
 const IMPACT_REPORTS_DIR  = path.join(REPORTS_DIR, 'impact_events');
@@ -162,18 +176,61 @@ function archiveTimestamp() {
     return getTimezoneTimestamp().slice(0, 19).replace('T', '_').replace(/:/g, '-'); // "2026-07-28_14-30-05"
 }
 
-// Continuous, always-on raw-reading log — one CSV per sensor per day,
-// independent of any export/test-run action. Never throws: a disk issue
-// here must never break the live Postgres/Socket.IO data pipeline.
-const RAW_LOG_HEADER = 'timestamp,sensor,x,y,z,gForce,rmsV,rmsL,sdV,sdL,p2pV,p2pL,peak,fs,window_ms\n';
+// Continuous, always-on raw-reading log — ONE combined CSV per day across
+// all sensors (track-geometry-car report format), independent of any
+// export/test-run action. Never throws: a disk issue here must never break
+// the live Postgres/Socket.IO data pipeline.
+//
+// Each sensor is an independent TCP connection with its own ~1s window
+// cadence — there's no shared clock across boards, so a "combined row"
+// reflects each sensor's *latest known* reading at write time, not a true
+// simultaneous sample (same tradeoff /api/test-report/csv already accepts
+// via index-based joining, just applied live here instead of in a batch
+// Postgres query).
+const latestSensorReading = {}; // { left: {x,y}, right: {...}, pivot: {...}, aux: {...} }
+const SENSOR_COLUMN_PAIR = { left: 'AB-L', right: 'AB-R', pivot: 'TRC-P', aux: 'TV-P' };
+const RAW_LOG_HEADER = 'Counter,Block,Railway,Division code,Division,Section,Line,SPD,KM,Meter,Millimeter,AB-L-VERT,AB-L-LAT,AB-R-VERT,AB-R-LAT,TRC-P-VERT,TRC-P-LAT,TV-P-VERT,TV-P-LAT,Rail: LH,Rail: RH,GPS Lat,GPS Lon\n';
+let rawLogCounter = 0; // resets whenever a new day's combined file starts
+let rawLogCurrentFile = null;
+
 function appendRawLog(sensorId, row) {
     try {
+        latestSensorReading[sensorId] = { x: row.x, y: row.y };
+
         const dateStr = getTimezoneTimestamp().slice(0, 10); // "YYYY-MM-DD"
-        const file = path.join(RAW_LOG_DIR, `${routePrefix()}${sensorId}_${dateStr}.csv`);
+        const file = path.join(RAW_LOG_DIR, `${routePrefix()}${dateStr}.csv`); // one file per day, all sensors
         const isNew = !fs.existsSync(file);
-        const line = [row.timestamp, row.sensor, row.x, row.y, row.z, row.gForce,
-                       row.rmsV, row.rmsL, row.sdV, row.sdL, row.p2pV, row.p2pL,
-                       row.peak, row.fs ?? '', row.window_ms ?? ''].join(',') + '\n';
+        if (isNew || file !== rawLogCurrentFile) { rawLogCounter = 0; rawLogCurrentFile = file; }
+        rawLogCounter++;
+
+        const totalM = totalDistanceM || 0;
+        const km = Math.floor(totalM / 1000);
+        const m  = Math.floor(totalM % 1000);
+        const mm = Math.round((totalM % 1) * 1000);
+
+        const cols = {};
+        Object.values(SENSOR_COLUMN_PAIR).forEach(pair => { cols[`${pair}-VERT`] = ''; cols[`${pair}-LAT`] = ''; });
+        Object.entries(SENSOR_COLUMN_PAIR).forEach(([sid, pair]) => {
+            const last = latestSensorReading[sid];
+            if (last) { cols[`${pair}-VERT`] = last.y; cols[`${pair}-LAT`] = last.x; }
+        });
+
+        const gpsLat = lastGpsCoord?.lat ?? '';
+        const gpsLon = lastGpsCoord?.lng ?? '';
+
+        const line = [
+            rawLogCounter,
+            sectionConfig.block ?? '', sectionConfig.railway ?? '',
+            sectionConfig.divisionCode ?? '', sectionConfig.division ?? '',
+            sectionConfig.section ?? '', sectionConfig.line ?? '',
+            '', // SPD — no global speed tracking point exists yet
+            km, m, mm,
+            cols['AB-L-VERT'], cols['AB-L-LAT'], cols['AB-R-VERT'], cols['AB-R-LAT'],
+            cols['TRC-P-VERT'], cols['TRC-P-LAT'], cols['TV-P-VERT'], cols['TV-P-LAT'],
+            sectionConfig.railLH ?? '', sectionConfig.railRH ?? '',
+            gpsLat, gpsLon,
+        ].join(',') + '\n';
+
         fs.appendFileSync(file, isNew ? RAW_LOG_HEADER + line : line);
     } catch (e) { console.error('[raw_log] append failed:', e.message); }
 }
@@ -783,7 +840,7 @@ app.get('/api/management/sensor-chart', async (req, res) => {
 
 // ── GET /api/acceleration/channels — generic, keys named lv/ll/rv/rl/pv/pl…
 // Convention: two-letter prefix per sensor slot (l=left,r=right,p=pivot,4th=q…)
-// then v (vertical, from z) / l (lateral, from x).
+// then v (vertical, from y) / l (lateral, from x).
 const CHANNEL_PREFIX = { left: 'l', right: 'r', pivot: 'p' };
 // For any future sensor not in this map, falls back to first letter of id.
 function channelPrefixFor(id) {
@@ -817,7 +874,7 @@ app.get('/api/acceleration/channels', async (req, res) => {
             }
             if (SENSOR_IDS.includes(doc.sensor)) {
                 const p = channelPrefixFor(doc.sensor);
-                buckets[sec][`${p}v`] = doc.z != null ? +parseFloat(doc.z).toFixed(4) : null;
+                buckets[sec][`${p}v`] = doc.y != null ? +parseFloat(doc.y).toFixed(4) : null;
                 buckets[sec][`${p}l`] = doc.x != null ? +parseFloat(doc.x).toFixed(4) : null;
             }
         }
@@ -1535,13 +1592,13 @@ const ACCEL_PKT_SIZE  = 16;
 const ACCEL_SYNC0 = 0xAB, ACCEL_SYNC1 = 0x56;
 const ACCEL_WINDOW_MS = 1000; // stats computed once per this many ms, per sensor
 
-// Which axis is "vertical" vs "lateral" per sensor — physical mounting isn't
-// finalized yet, change here once it is, nothing else needs to change.
+// Which axis is "vertical" vs "lateral" per sensor — confirmed against
+// physical mounting: Y is vertical, X is lateral.
 const ACCEL_AXIS_MAP = {
-    left:  { vertical: 'z', lateral: 'x' },
-    right: { vertical: 'z', lateral: 'x' },
-    pivot: { vertical: 'z', lateral: 'x' },
-    aux:   { vertical: 'z', lateral: 'x' },
+    left:  { vertical: 'y', lateral: 'x' },
+    right: { vertical: 'y', lateral: 'x' },
+    pivot: { vertical: 'y', lateral: 'x' },
+    aux:   { vertical: 'y', lateral: 'x' },
 };
 
 function crc16Ccitt(buf) {
@@ -2072,6 +2129,27 @@ app.post('/api/route-config', (req, res) => {
     console.log('[route] Config updated and saved to route_config.json');
     io.emit('route-config-changed', routeConfig);
     res.json({ success: true, routeConfig });
+});
+
+// ── Section metadata endpoints — Railway/Division/Section/Line/Block/Rail LH-RH, written onto every raw_log row ──
+app.get('/api/section-config', (req, res) => res.json(sectionConfig));
+
+app.post('/api/section-config', (req, res) => {
+    const { railway, divisionCode, division, section, line, block, railLH, railRH } = req.body;
+    sectionConfig = {
+        railway:      (railway || '').trim() || null,
+        divisionCode: (divisionCode || '').trim() || null,
+        division:     (division || '').trim() || null,
+        section:      (section || '').trim() || null,
+        line:         (line || '').trim() || null,
+        block:        (block || '').trim() || null,
+        railLH:       (railLH || '').trim() || null,
+        railRH:       (railRH || '').trim() || null,
+    };
+    saveSectionConfig(sectionConfig);
+    console.log('[section] Config updated and saved to section_config.json');
+    io.emit('section-config-changed', sectionConfig);
+    res.json({ success: true, sectionConfig });
 });
 
 // ── GET /api/sensors — new: lets frontend discover registered sensors dynamically

@@ -51,8 +51,8 @@ setInterval(updateOnlineStatus, 2000);
 })();
 
 // ── Channel derivation ────────────────────────────────────────────────────
-function getVert(x, y, z) { return Math.abs(z); }
-function getLat(x, y, z) { return Math.sqrt(x * x + y * y); }
+function getVert(x, y, z) { return Math.abs(y); }
+function getLat(x, y, z) { return Math.sqrt(x * x + z * z); }
 
 // ── Distance tracking ─────────────────────────────────────────────────────
 let distanceM = 0;

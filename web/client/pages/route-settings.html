@@ -39,6 +39,55 @@
                 </div>
             </div>
 
+            <!-- Section Metadata Display -->
+            <div class="current-config" id="sectionCurrentConfig">
+                <h4><i class="fas fa-check-circle"></i> Current Section Metadata</h4>
+                <div class="config-badges" id="sectionBadges">
+                    <!-- Populated by JavaScript -->
+                </div>
+            </div>
+
+            <!-- Section Metadata -->
+            <div class="threshold-section">
+                <div class="section-title">
+                    <i class="fas fa-map-signs"></i>
+                    <h2>Section Metadata</h2>
+                </div>
+
+                <div class="threshold-input">
+                    <label>Railway</label>
+                    <input type="text" id="railwayName" placeholder="e.g. Northern Eastern">
+                </div>
+                <div class="threshold-input">
+                    <label>Division Code</label>
+                    <input type="text" id="divisionCode" placeholder="e.g. 28">
+                </div>
+                <div class="threshold-input">
+                    <label>Division</label>
+                    <input type="text" id="divisionName" placeholder="e.g. Lucknow">
+                </div>
+                <div class="threshold-input">
+                    <label>Section</label>
+                    <input type="text" id="sectionCode" placeholder="e.g. LJN-STP">
+                </div>
+                <div class="threshold-input">
+                    <label>Line</label>
+                    <input type="text" id="lineCode" placeholder="e.g. SL">
+                </div>
+                <div class="threshold-input">
+                    <label>Block</label>
+                    <input type="text" id="blockCode" placeholder="e.g. 1">
+                </div>
+                <div class="threshold-input">
+                    <label>Rail: LH</label>
+                    <input type="text" id="railLH" placeholder="e.g. Kg52">
+                </div>
+                <div class="threshold-input">
+                    <label>Rail: RH</label>
+                    <input type="text" id="railRH" placeholder="e.g. Kg52">
+                </div>
+            </div>
+
             <!-- Validation Error -->
             <div id="validationError" class="validation-error">
                 <i class="fas fa-exclamation-triangle"></i> <span></span>
@@ -46,17 +95,17 @@
 
             <!-- Save Buttons -->
             <div class="save-section">
-                <button class="btn btn-secondary" onclick="clearRoute()">
-                    <i class="fas fa-undo"></i> Clear Route
+                <button class="btn btn-secondary" onclick="clearAll()">
+                    <i class="fas fa-undo"></i> Clear All
                 </button>
-                <button class="btn btn-primary" onclick="saveRouteConfig()">
-                    <i class="fas fa-save"></i> Save Route
+                <button class="btn btn-primary" onclick="saveAllConfig()">
+                    <i class="fas fa-save"></i> Save Configuration
                 </button>
             </div>
 
             <!-- Success Message -->
             <div id="successMessage" class="success-message">
-                <i class="fas fa-check-circle"></i> Route saved — new reports will be tagged with this route.
+                <i class="fas fa-check-circle"></i> Saved — new reports will be tagged with this route and section metadata.
             </div>
         </div>
     </div>

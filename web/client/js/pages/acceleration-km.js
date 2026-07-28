@@ -640,6 +640,14 @@ function generateFullDayCSV(docsForDay, reportDate) {
 
     // Download
     const csvContent = rows.join("\n");
+
+    // Fire-and-forget server-side archive — must never delay/block the download
+    fetch('/api/reports/km-wise', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ csv: csvContent, reportDate })
+    }).catch(e => console.warn('[km-wise] Server archive failed (download unaffected):', e));
+
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");

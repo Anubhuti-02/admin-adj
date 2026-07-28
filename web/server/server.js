@@ -126,6 +126,38 @@ function saveLimitsConfig(cfg) {
 let limitsConfig = loadLimitsConfig();
 console.log('[limits] Config loaded:', JSON.stringify(limitsConfig));
 
+// ── Report archival — on-demand export archives + continuous raw log ──────
+const REPORTS_DIR         = path.join(__dirname, 'reports');
+const IMPACT_REPORTS_DIR  = path.join(REPORTS_DIR, 'impact_events');
+const TESTRUN_REPORTS_DIR = path.join(REPORTS_DIR, 'test_runs');
+const KMWISE_REPORTS_DIR  = path.join(REPORTS_DIR, 'km_wise');
+const RAW_LOG_DIR         = path.join(REPORTS_DIR, 'raw_log');
+
+[IMPACT_REPORTS_DIR, TESTRUN_REPORTS_DIR, KMWISE_REPORTS_DIR, RAW_LOG_DIR].forEach(d => {
+    try { fs.mkdirSync(d, { recursive: true }); }
+    catch (e) { console.error(`[reports] Could not create ${d}:`, e.message); }
+});
+
+function archiveTimestamp() {
+    return getTimezoneTimestamp().slice(0, 19).replace('T', '_').replace(/:/g, '-'); // "2026-07-28_14-30-05"
+}
+
+// Continuous, always-on raw-reading log — one CSV per sensor per day,
+// independent of any export/test-run action. Never throws: a disk issue
+// here must never break the live Postgres/Socket.IO data pipeline.
+const RAW_LOG_HEADER = 'timestamp,sensor,x,y,z,gForce,rmsV,rmsL,sdV,sdL,p2pV,p2pL,peak,fs,window_ms\n';
+function appendRawLog(sensorId, row) {
+    try {
+        const dateStr = getTimezoneTimestamp().slice(0, 10); // "YYYY-MM-DD"
+        const file = path.join(RAW_LOG_DIR, `${sensorId}_${dateStr}.csv`);
+        const isNew = !fs.existsSync(file);
+        const line = [row.timestamp, row.sensor, row.x, row.y, row.z, row.gForce,
+                       row.rmsV, row.rmsL, row.sdV, row.sdL, row.p2pV, row.p2pL,
+                       row.peak, row.fs ?? '', row.window_ms ?? ''].join(',') + '\n';
+        fs.appendFileSync(file, isNew ? RAW_LOG_HEADER + line : line);
+    } catch (e) { console.error('[raw_log] append failed:', e.message); }
+}
+
 // ── Express / Socket.IO / Postgres ─────────────────────────────────────────
 const { Pool } = require('pg');
 const pool = new Pool({
@@ -1238,6 +1270,8 @@ async function handleBinarySensorPacket(sensorMeta, message, timestamp) {
         ).catch(e => console.error('realtime_data insert:', e.message));
     }
 
+    appendRawLog(sensorId, { timestamp, sensor: sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak });
+
     // Impact detection — generic, works for any registered sensor
     const peakVal = peak || gForce;
     if (peakVal > 2) {
@@ -1467,15 +1501,13 @@ const SYNC0 = 0xAA, SYNC1 = 0x55;
 // these boards only send raw X/Y/Z per sample — RMS/SD/P2P/Peak/fs are
 // computed here in software from a rolling window of samples.
 // ═════════════════════════════════════════════════════════════════════════
-// IP -> sensor id. Confirmed against the hardware team's reference receiver
-// (tcp_binary_server1.py running on adjserver) — note .202 is NOT used,
-// ACCEL-2 is .203. These 4 boards are assumed to replace the old left/right
+// IP -> sensor id. These 4 boards are assumed to replace the old left/right
 // hardware (not run concurrently with it) — see the packetType 0x01/0x02
 // MQTT path above, which is left in place but will collide on the same
 // device_id if that old hardware is ever reconnected.
 const ACCEL_SENSOR_IPS = {
     '192.168.1.201': 'left',   // ACCEL-1
-    '192.168.1.203': 'right',  // ACCEL-2 (.202 is not used)
+    '192.168.1.202': 'right',  // ACCEL-2
     '192.168.1.204': 'pivot',  // ACCEL-3
     '192.168.1.205': 'aux',    // ACCEL-4
 };
@@ -1639,6 +1671,8 @@ async function processRawAccelReading(sensorMeta, stats, timestamp) {
             [timestamp, sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak]
         ).catch(e => console.error('realtime_data insert:', e.message));
     }
+
+    appendRawLog(sensorId, { timestamp, sensor: sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, fs, window_ms: windowMs });
 
     const peakVal = peak || gForce;
     if (peakVal > 2) {
@@ -1869,9 +1903,17 @@ app.get('/api/test-report/csv', async (req, res) => {
         }
 
         const filename = `test_report_${fromDt.toISOString().slice(0,10)}_${fromDt.toTimeString().slice(0,8).replace(/:/g,'-')}.csv`;
+        const csvBody  = lines.join('\r\n');
+
+        const archiveName = filename.replace(/\.csv$/, `_${archiveTimestamp()}.csv`);
+        try {
+            fs.writeFileSync(path.join(TESTRUN_REPORTS_DIR, archiveName), csvBody);
+            console.log(`[reports] Archived to ${archiveName}`);
+        } catch (e) { console.error('[reports] Archive write failed:', e.message); }
+
         res.setHeader('Content-Type', 'text/csv');
         res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-        res.send(lines.join('\r\n'));
+        res.send(csvBody);
     } catch (e) {
         console.error('/api/test-report/csv error:', e.message);
         res.status(500).send('Export failed: ' + e.message);
@@ -1928,10 +1970,35 @@ app.get('/api/impacts/export/csv', async (req, res) => {
 
     const csv = [headers.join(','), ...rows].join('\n');
     const filename = `impact_report_${label}.csv`;
+
+    const archiveName = filename.replace(/\.csv$/, `_${archiveTimestamp()}.csv`);
+    try {
+        fs.writeFileSync(path.join(IMPACT_REPORTS_DIR, archiveName), csv);
+        console.log(`[reports] Archived to ${archiveName}`);
+    } catch (e) { console.error('[reports] Archive write failed:', e.message); }
+
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Cache-Control', 'no-cache');
     res.send(csv);
+});
+
+// ── KM-wise report archive — client already builds the CSV; just persist it ──
+app.post('/api/reports/km-wise', express.json({ limit: '15mb' }), (req, res) => {
+    const { csv, reportDate } = req.body || {};
+    if (!csv || typeof csv !== 'string') {
+        return res.status(400).json({ success: false, error: 'csv (string) required' });
+    }
+    const safeDate = (reportDate || new Date().toISOString().slice(0, 10)).replace(/[^0-9-]/g, '');
+    const archiveName = `KM_Report_${safeDate}_${archiveTimestamp()}.csv`;
+    try {
+        fs.writeFileSync(path.join(KMWISE_REPORTS_DIR, archiveName), csv);
+        console.log(`[reports] Archived to ${archiveName}`);
+        res.json({ success: true, archived: archiveName });
+    } catch (e) {
+        console.error('[reports] Archive write failed:', e.message);
+        res.status(500).json({ success: false, error: e.message });
+    }
 });
 
 // ── ODR config endpoints — now generic over SENSORS registry ──────────────

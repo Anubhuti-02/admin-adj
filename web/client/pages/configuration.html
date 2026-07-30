@@ -166,10 +166,98 @@
                 </div>
             </div>
 
+            <!-- Accel 1 (Left) Axis Limit Values -->
+            <div class="peak-limits-section">
+                <div class="peak-limits-header">
+                    <h3><i class="fas fa-microchip" style="color: #0891b2; margin-right: 8px;"></i>Axis Limit Values - Left</h3>
+                    <span style="color: #64748b; font-size: 0.9rem;">Configure available peak limits per axis for Accelerometer 1 classification</span>
+                </div>
+            
+                <!-- X axis -->
+                <div class="axis-limit-group axis-x">
+                    <div class="axis-limit-label axis-x"><i class="fas fa-arrows-alt-h"></i> X-Axis Limits</div>
+                    <div class="limits-container" id="limitsContainerA1X"></div>
+                    <div class="add-limit">
+                        <input type="number" id="newLimitA1X" placeholder="Enter new X-axis limit (e.g., 15)" step="0.1" min="0">
+                        <button class="btn btn-secondary" onclick="addAccelAxisLimit('a1','x')">
+                            <i class="fas fa-plus"></i> Add
+                        </button>
+                    </div>
+                </div>
+            
+                <!-- Y axis -->
+                <div class="axis-limit-group axis-y">
+                    <div class="axis-limit-label axis-y"><i class="fas fa-arrows-alt-v"></i> Y-Axis Limits</div>
+                    <div class="limits-container" id="limitsContainerA1Y"></div>
+                    <div class="add-limit">
+                        <input type="number" id="newLimitA1Y" placeholder="Enter new Y-axis limit (e.g., 15)" step="0.1" min="0">
+                        <button class="btn btn-secondary" onclick="addAccelAxisLimit('a1','y')">
+                            <i class="fas fa-plus"></i> Add
+                        </button>
+                    </div>
+                </div>
+            
+                <!-- Z axis -->
+                <div class="axis-limit-group axis-z">
+                    <div class="axis-limit-label axis-z"><i class="fas fa-arrow-up"></i> Z-Axis Limits</div>
+                    <div class="limits-container" id="limitsContainerA1Z"></div>
+                    <div class="add-limit">
+                        <input type="number" id="newLimitA1Z" placeholder="Enter new Z-axis limit (e.g., 15)" step="0.1" min="0">
+                        <button class="btn btn-secondary" onclick="addAccelAxisLimit('a1','z')">
+                            <i class="fas fa-plus"></i> Add
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Accel 2 (Right) Axis Limit Values -->
+            <div class="peak-limits-section">
+                <div class="peak-limits-header">
+                    <h3><i class="fas fa-microchip" style="color: #7c3aed; margin-right: 8px;"></i>Axis Limit Values - Right</h3>
+                    <span style="color: #64748b; font-size: 0.9rem;">Configure available peak limits per axis for Accelerometer 2 classification</span>
+                </div>
+            
+                <!-- X axis -->
+                <div class="axis-limit-group axis-x">
+                    <div class="axis-limit-label axis-x"><i class="fas fa-arrows-alt-h"></i> X-Axis Limits</div>
+                    <div class="limits-container" id="limitsContainerA2X"></div>
+                    <div class="add-limit">
+                        <input type="number" id="newLimitA2X" placeholder="Enter new X-axis limit (e.g., 15)" step="0.1" min="0">
+                        <button class="btn btn-secondary" onclick="addAccelAxisLimit('a2','x')">
+                            <i class="fas fa-plus"></i> Add
+                        </button>
+                    </div>
+                </div>
+            
+                <!-- Y axis -->
+                <div class="axis-limit-group axis-y">
+                    <div class="axis-limit-label axis-y"><i class="fas fa-arrows-alt-v"></i> Y-Axis Limits</div>
+                    <div class="limits-container" id="limitsContainerA2Y"></div>
+                    <div class="add-limit">
+                        <input type="number" id="newLimitA2Y" placeholder="Enter new Y-axis limit (e.g., 15)" step="0.1" min="0">
+                        <button class="btn btn-secondary" onclick="addAccelAxisLimit('a2','y')">
+                            <i class="fas fa-plus"></i> Add
+                        </button>
+                    </div>
+                </div>
+            
+                <!-- Z axis -->
+                <div class="axis-limit-group axis-z">
+                    <div class="axis-limit-label axis-z"><i class="fas fa-arrow-up"></i> Z-Axis Limits</div>
+                    <div class="limits-container" id="limitsContainerA2Z"></div>
+                    <div class="add-limit">
+                        <input type="number" id="newLimitA2Z" placeholder="Enter new Z-axis limit (e.g., 15)" step="0.1" min="0">
+                        <button class="btn btn-secondary" onclick="addAccelAxisLimit('a2','z')">
+                            <i class="fas fa-plus"></i> Add
+                        </button>
+                    </div>
+                </div>
+</div>
+
             <!-- Axis Limits Section (X / Y / Z) — separate per-axis peak limit lists -->
             <div class="peak-limits-section">
                 <div class="peak-limits-header">
-                    <h3><i class="fas fa-chart-line" style="color: #22c55e; margin-right: 8px;"></i>Axis Limit Values</h3>
+                    <h3><i class="fas fa-chart-line" style="color: #22c55e; margin-right: 8px;"></i>Axis Limit Values - Pivot</h3>
                     <span style="color: #64748b; font-size: 0.9rem;">Configure available peak limits per axis for classification</span>
                 </div>
 

@@ -67,7 +67,6 @@ function formatDistLabel(m) {
     const rem = m % 1000;
     return km + '.' + String(rem).padStart(3, '0') + ' km';
 }
-function advanceDistance() { distanceM += 10; }
 
 // ── Rolling buffers (for RCI and raw subplots only) ───────────────────────
 const RAW_N = 80;
@@ -590,6 +589,13 @@ const socket = io(SERVER_URL, { transports: ['websocket', 'polling'], reconnecti
 socket.on('connect', () => console.log('[graphs] Socket connected ✓'));
 socket.on('disconnect', () => console.warn('[graphs] Disconnected'));
 
+// Real GPS-based distance (server-tracked totalDistanceM) — replaces the old
+// synthetic +10m-per-accel-packet counter, which drifted at whatever rate
+// the accel socket happened to emit rather than actual distance traveled.
+socket.on('gps-data', data => {
+    if (typeof data.totalDistanceM === 'number') distanceM = data.totalDistanceM;
+});
+
 // ── Sync Sperling Bf when ODR changes from settings page ──────────────────
 socket.on('odr-config-changed', (cfg) => {
     const avgOdr = (cfg.accel1 + cfg.accel2) / 2;
@@ -678,8 +684,9 @@ socket.on('accelerometer-data', data => {
     document.getElementById(pfx + 'RefreshTime').textContent = '🕐 ' + now.toLocaleTimeString('en-IN', { hour12: false }) + ' ' + now.toLocaleDateString('en-IN');
 
     // ── Distance chart (left sensor drives distance, live mode only) ─────
+    // distanceM is updated in real time by the 'gps-data' socket listener
+    // above — this just reads whatever the latest real distance is.
     if (side === 'left' && distMode === 'live') {
-        advanceDistance();
         const distLabel = formatDistLabel(distanceM);
 
         distanceChart.data.labels.push(distLabel);

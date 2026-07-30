@@ -202,6 +202,7 @@ async function fetchChartFromDB() {
         const newLabels = Array(CHART_POINTS).fill('');
         const newLeft   = Array(CHART_POINTS).fill(null);
         const newRight  = Array(CHART_POINTS).fill(null);
+        const newPivot  = Array(CHART_POINTS).fill(null);
 
         if (windowed.length > 0) {
             // Check if sensors have gone stale

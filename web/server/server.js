@@ -190,7 +190,9 @@ function archiveTimestamp() {
 const latestSensorReading = {}; // { left: {x,y}, right: {...}, pivot: {...}, aux: {...} }
 const SENSOR_COLUMN_PAIR = { left: 'AB-L', right: 'AB-R', pivot: 'TRC-P', aux: 'TV-P' };
 const RAW_LOG_HEADER = 'Counter,Block,Railway,Division code,Division,Section,Line,SPD,KM,Meter,Millimeter,AB-L-VERT,AB-L-LAT,AB-R-VERT,AB-R-LAT,TRC-P-VERT,TRC-P-LAT,TV-P-VERT,TV-P-LAT,Rail: LH,Rail: RH,GPS Lat,GPS Lon\n';
-let rawLogCounter = 0; // resets whenever a new day's combined file starts
+const RAW_LOG_COUNTER_START = 100000;
+const RAW_LOG_COUNTER_STEP  = 250;
+let rawLogCounter = RAW_LOG_COUNTER_START; // resets whenever a new day's combined file starts
 let rawLogCurrentFile = null;
 
 function appendRawLog(sensorId, row) {
@@ -200,8 +202,8 @@ function appendRawLog(sensorId, row) {
         const dateStr = getTimezoneTimestamp().slice(0, 10); // "YYYY-MM-DD"
         const file = path.join(RAW_LOG_DIR, `${routePrefix()}${dateStr}.csv`); // one file per day, all sensors
         const isNew = !fs.existsSync(file);
-        if (isNew || file !== rawLogCurrentFile) { rawLogCounter = 0; rawLogCurrentFile = file; }
-        rawLogCounter++;
+        if (isNew || file !== rawLogCurrentFile) { rawLogCounter = RAW_LOG_COUNTER_START; rawLogCurrentFile = file; }
+        else { rawLogCounter += RAW_LOG_COUNTER_STEP; }
 
         const totalM = totalDistanceM || 0;
         const km = Math.floor(totalM / 1000);
@@ -217,13 +219,14 @@ function appendRawLog(sensorId, row) {
 
         const gpsLat = lastGpsCoord?.lat ?? '';
         const gpsLon = lastGpsCoord?.lng ?? '';
+        const spd    = lastGpsCoord?.speedKmh ?? '';
 
         const line = [
             rawLogCounter,
             sectionConfig.block ?? '', sectionConfig.railway ?? '',
             sectionConfig.divisionCode ?? '', sectionConfig.division ?? '',
             sectionConfig.section ?? '', sectionConfig.line ?? '',
-            '', // SPD — no global speed tracking point exists yet
+            spd,
             km, m, mm,
             cols['AB-L-VERT'], cols['AB-L-LAT'], cols['AB-R-VERT'], cols['AB-R-LAT'],
             cols['TRC-P-VERT'], cols['TRC-P-LAT'], cols['TV-P-VERT'], cols['TV-P-LAT'],
@@ -1321,8 +1324,8 @@ async function handleBinarySensorPacket(sensorMeta, message, timestamp) {
             const d    = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
             if (d >= 5 && d < 500) totalDistanceM += d;
         }
-        lastGpsCoord = { lat, lng };
         const speedKmh = +(speedMs * 0.036).toFixed(2);
+        lastGpsCoord = { lat, lng, speedKmh };
         io.emit('gps-data', { lat, lng, speedKmh, totalDistanceM, timestamp });
         if (pgReady) {
             pool.query('INSERT INTO rm_gps (timestamp, lat, lng, speed_kmh, total_distance_m) VALUES ($1,$2,$3,$4,$5)',
@@ -1448,7 +1451,7 @@ mqttClient.on('message', async (topic, message) => {
                     const d    = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
                     if (d >= 5 && d < 500) totalDistanceM += d;
                 }
-                lastGpsCoord = { lat, lng };
+                lastGpsCoord = { lat, lng, speedKmh };
                 io.emit('gps-data', { lat, lng, speedKmh, totalDistanceM, timestamp });
                 if (pgReady) {
                     pool.query('INSERT INTO rm_gps (timestamp, lat, lng, speed_kmh, total_distance_m) VALUES ($1,$2,$3,$4,$5)',
@@ -1590,7 +1593,7 @@ const ACCEL_SENSOR_IPS = {
 };
 const ACCEL_PKT_SIZE  = 16;
 const ACCEL_SYNC0 = 0xAB, ACCEL_SYNC1 = 0x56;
-const ACCEL_WINDOW_MS = 1000; // stats computed once per this many ms, per sensor
+const ACCEL_WINDOW_MS = 250; // stats computed once per this many ms, per sensor — matches GPS's ~4/sec fix rate
 
 // Which axis is "vertical" vs "lateral" per sensor — confirmed against
 // physical mounting: Y is vertical, X is lateral.
@@ -1623,7 +1626,7 @@ function processGpsFix(lat, lng, speedKmh) {
         const d    = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
         if (d >= 5 && d < 500) totalDistanceM += d;
     }
-    lastGpsCoord = { lat, lng };
+    lastGpsCoord = { lat, lng, speedKmh };
     io.emit('gps-data', { lat, lng, speedKmh, totalDistanceM, timestamp });
     if (pgReady) {
         pool.query('INSERT INTO rm_gps (timestamp, lat, lng, speed_kmh, total_distance_m) VALUES ($1,$2,$3,$4,$5)',
@@ -1782,11 +1785,10 @@ async function processRawAccelReading(sensorMeta, stats, timestamp) {
         computeStats(24).then(s => io.emit('stats-update', s)).catch(() => {});
     }
 
-    if (shouldEmit(sensorId)) {
-        io.emit('accelerometer-data', { sensor: sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, timestamp });
-    } else {
-        console.log(`[ODR] Dropped: ${sensorId} @ ${odrConfig[sensorMeta.odrKey]}Hz`);
-    }
+    // ODR decimation assumes a 200Hz base rate — the raw-accel TCP path is
+    // already rate-limited by AccelWindow (one flush per ACCEL_WINDOW_MS),
+    // so there's nothing left to decimate; always emit every window.
+    io.emit('accelerometer-data', { sensor: sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, timestamp });
 }
 
 function handleAccelSocket(socket, firstChunk) {

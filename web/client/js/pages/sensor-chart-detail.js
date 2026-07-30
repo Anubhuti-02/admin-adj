@@ -103,13 +103,17 @@ function setChartMsg(msg) {
 }
 
 // ── Live mode — rolling buffer, same pattern as management-dashboard.js ────
+// Starts EMPTY (not pre-filled with nulls) so the chart shows real data
+// building up from the first point on load/server-start, instead of a
+// mostly-blank 300-point window with just a sliver of real data at the
+// end. Grows up to DETAIL_CHART_POINTS, then rolls (shift+push) once full.
 const STALE_CUTOFF_MS = 15 * 1000;
 const chartBuf = {
-    labels: Array(DETAIL_CHART_POINTS).fill(''),
-    left:   Array(DETAIL_CHART_POINTS).fill(null),
-    right:  Array(DETAIL_CHART_POINTS).fill(null),
-    pivot:  Array(DETAIL_CHART_POINTS).fill(null),
-    ts:     Array(DETAIL_CHART_POINTS).fill(null),
+    labels: [],
+    left:   [],
+    right:  [],
+    pivot:  [],
+    ts:     [],
 };
 const lastSeenAt = { left: 0, right: 0, pivot: 0 };
 
@@ -117,11 +121,13 @@ function pushChartPoint(sensor, gForce) {
     if (!['left', 'right', 'pivot'].includes(sensor)) return;
     lastSeenAt[sensor] = Date.now();
 
-    chartBuf.labels.shift();
-    chartBuf.left.shift();
-    chartBuf.right.shift();
-    chartBuf.pivot.shift();
-    chartBuf.ts.shift();
+    if (chartBuf.labels.length >= DETAIL_CHART_POINTS) {
+        chartBuf.labels.shift();
+        chartBuf.left.shift();
+        chartBuf.right.shift();
+        chartBuf.pivot.shift();
+        chartBuf.ts.shift();
+    }
 
     const now = new Date();
     chartBuf.labels.push(now.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false }));
@@ -144,7 +150,7 @@ function pushChartPoint(sensor, gForce) {
 setInterval(() => {
     const now = Date.now();
     ['left', 'right', 'pivot'].forEach(sensor => {
-        if (lastSeenAt[sensor] && now - lastSeenAt[sensor] > STALE_CUTOFF_MS) {
+        if (lastSeenAt[sensor] && chartBuf[sensor].length && now - lastSeenAt[sensor] > STALE_CUTOFF_MS) {
             chartBuf[sensor][chartBuf[sensor].length - 1] = null;
         }
     });
@@ -156,15 +162,16 @@ function backToLive() {
     isPaused = false;
 
     // Coming from History mode: chartBuf was never touched while we were
-    // away, so it's stale/blank — reset it clean. Coming from a paused
-    // live pan/zoom: chartBuf has been recording in the background the
-    // whole time, so just redraw what's already there — no data lost.
+    // away, so it's stale — clear it so live mode restarts fresh from
+    // empty (grows back up from the first new point, same as page load).
+    // Coming from a paused live pan/zoom: chartBuf has been recording in
+    // the background the whole time, so just redraw what's already there.
     if (wasHistory) {
-        chartBuf.labels.fill('');
-        chartBuf.left.fill(null);
-        chartBuf.right.fill(null);
-        chartBuf.pivot.fill(null);
-        chartBuf.ts.fill(null);
+        chartBuf.labels.length = 0;
+        chartBuf.left.length   = 0;
+        chartBuf.right.length  = 0;
+        chartBuf.pivot.length  = 0;
+        chartBuf.ts.length     = 0;
     }
 
     detailTimestamps = chartBuf.ts;

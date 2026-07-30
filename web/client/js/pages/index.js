@@ -9,7 +9,8 @@ const ACCEL_STATES = ['not-connected', 'initialized', 'connected'];
 // ── Sensor state cache (left panel uses this) ─────────────────────────────
 const sensorCache = {
     left:  { vert: null, lat: null },
-    right: { vert: null, lat: null }
+    right: { vert: null, lat: null },
+    pivot: { x: null, y: null }
 };
 
 // ── Distance tracking (meter-wise, increments per data packet) ────────────
@@ -92,11 +93,16 @@ function updateNorthernPanel() {
     const ablLat  = document.getElementById('ablLat');
     const abrVert = document.getElementById('abrVert');
     const abrLat  = document.getElementById('abrLat');
+    const pivotX  = document.getElementById('pivotX');
+    const pivotY  = document.getElementById('pivotY');
 
     if (ablVert && L.vert !== null) ablVert.textContent = L.vert.toFixed(4) + ' g';
     if (ablLat  && L.lat !== null) ablLat.textContent  = L.lat.toFixed(4) + ' g';
     if (abrVert && R.vert !== null) abrVert.textContent = R.vert.toFixed(4) + ' g';
     if (abrLat  && R.lat !== null) abrLat.textContent  = R.lat.toFixed(4) + ' g';
+    if (pivotX  && P.x !== null)   pivotX.textContent  = P.x.toFixed(4) + ' g';
+    if (pivotY  && P.y !== null)   pivotY.textContent  = P.y.toFixed(4) + ' g';
+
 
     // Increment counter on each packet
     const counter = document.getElementById('counter');
@@ -269,11 +275,18 @@ function connectToBackend() {
 
     socket.on('accelerometer-data', data => {
         const side = data.sensor;
-        if (side !== 'left' && side !== 'right') return;
+        if (side !== 'left' && side !== 'right' && side !== 'pivot') return;
 
         lastSensorDataTime = Date.now();
         updateHeaderStatus();
 
+        if (side === 'pivot') {
+        sensorCache.pivot.x = data.x ?? 0;
+        sensorCache.pivot.y = data.y ?? 0;
+        updateNorthernPanel();
+        return;
+        }
+        
         const x    = data.x ?? 0;
         const y    = data.y ?? 0;
         const z    = data.z ?? 0;

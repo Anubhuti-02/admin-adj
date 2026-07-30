@@ -182,62 +182,53 @@ async function fetchSystemHealth() {
     } catch (e) { console.error('system-health fetch error:', e); }
 }
 
-// ── Fetch chart from DB and update rolling window ─────────────────────────
-// Only shows data from the last 2 minutes. If the latest DB point is >15s
-// old (sensor disconnected), the right-hand side of the chart goes null so
-// the line visibly drops off instead of showing stale data.
-const CHART_WINDOW_MS  = 2 * 60 * 1000;  // 2 minutes visible
-const STALE_CUTOFF_MS  = 15 * 1000;      // sensor considered offline after 15s
+// ── Live chart via socket — same pattern as operator-dashboard.js's
+// pushToChart(): each 'accelerometer-data' event pushes one point into a
+// fixed-size rolling buffer and redraws immediately, no polling/DB round
+// trip. STALE_CUTOFF_MS still governs when a sensor's line drops to null
+// if it stops sending, checked on a slow interval since that's not
+// something a live event can tell us on its own.
+const STALE_CUTOFF_MS = 15 * 1000; // sensor considered offline after 15s
 
-async function fetchChartFromDB() {
-    try {
-        const data = await fetch(`${API}/api/management/sensor-chart-recent`).then(r => r.json());
+const chartBuf = {
+    labels: Array(CHART_POINTS).fill(''),
+    left:   Array(CHART_POINTS).fill(null),
+    right:  Array(CHART_POINTS).fill(null),
+    pivot:  Array(CHART_POINTS).fill(null),
+};
+const lastSeenAt = { left: 0, right: 0, pivot: 0 };
 
-        const now       = Date.now();
-        const windowCut = new Date(now - CHART_WINDOW_MS).toISOString().slice(0, 19);
+function pushChartPoint(sensor, gForce) {
+    if (!['left', 'right', 'pivot'].includes(sensor)) return;
+    lastSeenAt[sensor] = Date.now();
 
-        // Only keep points within the 2-minute window
-        const windowed = data.filter(pt => pt.ts >= windowCut);
+    chartBuf.labels.shift();
+    chartBuf.left.shift();
+    chartBuf.right.shift();
+    chartBuf.pivot.shift();
 
-        const newLabels = Array(CHART_POINTS).fill('');
-        const newLeft   = Array(CHART_POINTS).fill(null);
-        const newRight  = Array(CHART_POINTS).fill(null);
-        const newPivot  = Array(CHART_POINTS).fill(null);
+    chartBuf.labels.push(new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false }));
+    chartBuf.left.push(sensor === 'left'  ? gForce : (chartBuf.left[chartBuf.left.length - 1]  ?? null));
+    chartBuf.right.push(sensor === 'right' ? gForce : (chartBuf.right[chartBuf.right.length - 1] ?? null));
+    chartBuf.pivot.push(sensor === 'pivot' ? gForce : (chartBuf.pivot[chartBuf.pivot.length - 1] ?? null));
 
-        if (windowed.length > 0) {
-            // Check if sensors have gone stale
-            const latestTs  = windowed[windowed.length - 1].ts;
-            const staleMs   = now - new Date(latestTs).getTime();
-            const isStale   = staleMs > STALE_CUTOFF_MS;
-
-            const slice = windowed.slice(-CHART_POINTS);
-            const start = CHART_POINTS - slice.length;
-            slice.forEach((pt, i) => {
-                newLabels[start + i] = pt.ts ? new Date(pt.ts).toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false }) : '';
-                // If stale, only fill up to the last real point — leave rest null
-                if (!isStale) {
-                    newLeft[start + i]  = pt.left;
-                    newRight[start + i] = pt.right;
-                    newPivot[start + i] = pt.pivot;
-                } else {
-                    // Show data up to last known, then null gap at the end
-                    const ageMs = now - new Date(pt.ts).getTime();
-                    if (ageMs > STALE_CUTOFF_MS) {
-                        newLeft[start + i]  = pt.left;
-                        newRight[start + i] = pt.right;
-                        newPivot[start + i] = pt.pivot;                    }
-                    // points within the stale gap stay null → line drops off
-                }
-            });
-        }
-
-        sensorChart.data.labels           = newLabels;
-        sensorChart.data.datasets[0].data = newLeft;
-        sensorChart.data.datasets[1].data = newRight;
-        sensorChart.data.datasets[2].data = newPivot;
-        sensorChart.update('none');
-    } catch (e) { console.error('chart DB fetch error:', e); }
+    sensorChart.data.labels           = chartBuf.labels;
+    sensorChart.data.datasets[0].data = chartBuf.left;
+    sensorChart.data.datasets[1].data = chartBuf.right;
+    sensorChart.data.datasets[2].data = chartBuf.pivot;
+    sensorChart.update('none');
 }
+
+// Drop a sensor's line to null once it's gone quiet for STALE_CUTOFF_MS —
+// checked periodically since silence can't trigger this on its own.
+setInterval(() => {
+    const now = Date.now();
+    ['left', 'right', 'pivot'].forEach(sensor => {
+        if (lastSeenAt[sensor] && now - lastSeenAt[sensor] > STALE_CUTOFF_MS) {
+            chartBuf[sensor][chartBuf[sensor].length - 1] = null;
+        }
+    });
+}, 1000);
 
 // ── GPS ────────────────────────────────────────────────────────────────────
 async function fetchGPS() {
@@ -266,33 +257,29 @@ async function fetchGPS() {
 }
 
 // ── Initial load ──────────────────────────────────────────────────────────
-fetchChartFromDB();
 fetchUptime();
 fetchActiveSensors();
 fetchActiveAlerts();
 fetchSystemHealth();
 fetchGPS();
 
-function getChartPollMs() {
-    if (typeof AccelConfig === 'undefined') return 3000;
-    const avg = (AccelConfig.getOdr(1) + AccelConfig.getOdr(2)) / 2;
-    if (avg >= 150) return 3000;
-    if (avg >= 75)  return 6000;
-    return 12000;
-}
-let _mgmtPollTimer = null;
-function restartMgmtPoll() {
-    if (_mgmtPollTimer) clearInterval(_mgmtPollTimer);
-    _mgmtPollTimer = setInterval(() => { 
-        fetchChartFromDB();
-        fetchActiveSensors();
-        fetchSystemHealth();
-        fetchGPS();
-    }, getChartPollMs());
-}
-if (typeof AccelConfig !== 'undefined') AccelConfig.onChange(restartMgmtPoll);
-restartMgmtPoll();
-setInterval(() => { 
+// The chart itself is fully live/socket-driven (pushChartPoint, wired to
+// 'accelerometer-data' below) — these are the other panels, which don't
+// need sub-second freshness.
+setInterval(() => {
+    fetchActiveSensors();
+    fetchSystemHealth();
+    fetchGPS();
+}, 3000);
+setInterval(() => {
     fetchUptime();
-    fetchActiveAlerts(); 
-    }, 15000);
+    fetchActiveAlerts();
+}, 15000);
+
+// ── Socket.IO — live chart updates, no polling/DB round trip ──────────────
+const socket = io(API);
+socket.on('connect', () => console.log('[mgmt] Socket connected ✓'));
+socket.on('disconnect', () => console.warn('[mgmt] Disconnected'));
+socket.on('accelerometer-data', data => {
+    pushChartPoint(data.sensor, data.peak ?? data.gForce ?? 0);
+});

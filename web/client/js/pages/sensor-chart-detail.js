@@ -9,6 +9,7 @@ const API = window.location.origin;
 const DETAIL_CHART_POINTS = 300; // ~5 min of context at 1 pt/sec
 
 let liveMode = true;
+let isPaused = false; // true once the user pans/zooms in live mode — data keeps arriving in the background, chart just stops redrawing until "Back to Live"
 let detailTimestamps = [];
 
 const detailCtx = document.getElementById('detailChart').getContext('2d');
@@ -48,8 +49,19 @@ const detailChart = new Chart(detailCtx, {
                 }
             },
             zoom: {
-                pan: { enabled: true, mode: 'x' },
-                zoom: { wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x' }
+                pan: {
+                    enabled: true, mode: 'x',
+                    onPanStart: () => { if (liveMode) pauseLive(); }
+                },
+                zoom: {
+                    wheel: { enabled: true }, pinch: { enabled: true }, mode: 'x',
+                    onZoomStart: () => { if (liveMode) pauseLive(); }
+                },
+                limits: {
+                    // Don't allow zooming in past ~15 points wide — any tighter and
+                    // individual peaks become indistinguishable from each other.
+                    x: { minRange: 15 }
+                }
             },
             annotation: { annotations: {} }
         },
@@ -66,8 +78,21 @@ window.resetDetailZoom = resetDetailZoom;
 function setModeBadge(mode) {
     const badge = document.getElementById('modeBadge');
     if (!badge) return;
-    badge.textContent = mode === 'live' ? '● LIVE' : '◆ HISTORY';
-    badge.style.background = mode === 'live' ? '#22c55e' : '#0891b2';
+    if (mode === 'live')   { badge.textContent = '● LIVE';    badge.style.background = '#22c55e'; }
+    else if (mode === 'paused') { badge.textContent = '⏸ PAUSED (still recording)'; badge.style.background = '#f59e0b'; }
+    else                   { badge.textContent = '◆ HISTORY'; badge.style.background = '#0891b2'; }
+}
+
+// Called the moment the user pans/zooms while in live mode. Data keeps
+// flowing into chartBuf in the background (pushChartPoint still runs),
+// it just stops calling detailChart.update() so the view doesn't jump
+// out from under the user. "Back to Live" resumes redrawing at the
+// current (fully caught-up) buffer.
+function pauseLive() {
+    if (isPaused) return;
+    isPaused = true;
+    setModeBadge('paused');
+    setChartMsg('Paused — still recording in the background. Click "Back to Live" to resume and jump to the latest data.');
 }
 
 function setChartMsg(msg) {
@@ -110,7 +135,10 @@ function pushChartPoint(sensor, gForce) {
     detailChart.data.datasets[0].data = chartBuf.left;
     detailChart.data.datasets[1].data = chartBuf.right;
     detailChart.data.datasets[2].data = chartBuf.pivot;
-    detailChart.update('none');
+
+    // Keep recording into chartBuf even while paused — just don't redraw,
+    // so the user's pan/zoom position isn't disturbed until they resume.
+    if (!isPaused) detailChart.update('none');
 }
 
 setInterval(() => {
@@ -123,12 +151,22 @@ setInterval(() => {
 }, 1000);
 
 function backToLive() {
+    const wasHistory = !liveMode;
     liveMode = true;
-    chartBuf.labels.fill('');
-    chartBuf.left.fill(null);
-    chartBuf.right.fill(null);
-    chartBuf.pivot.fill(null);
-    chartBuf.ts.fill(null);
+    isPaused = false;
+
+    // Coming from History mode: chartBuf was never touched while we were
+    // away, so it's stale/blank — reset it clean. Coming from a paused
+    // live pan/zoom: chartBuf has been recording in the background the
+    // whole time, so just redraw what's already there — no data lost.
+    if (wasHistory) {
+        chartBuf.labels.fill('');
+        chartBuf.left.fill(null);
+        chartBuf.right.fill(null);
+        chartBuf.pivot.fill(null);
+        chartBuf.ts.fill(null);
+    }
+
     detailTimestamps = chartBuf.ts;
     detailChart.data.labels           = chartBuf.labels;
     detailChart.data.datasets[0].data = chartBuf.left;
@@ -176,6 +214,7 @@ async function loadHistoricalRange() {
         detailChart.update('none');
 
         liveMode = false;
+        isPaused = false;
         setModeBadge('history');
         setChartMsg(`Showing ${data.length} points · ${fromEl.value.replace('T', ' ')} → ${toEl.value.replace('T', ' ')} · Drag to scroll, scroll wheel to zoom`);
     } catch (e) {

@@ -852,17 +852,23 @@ function channelPrefixFor(id) {
 
 app.get('/api/acceleration/channels', async (req, res) => {
     try {
-        const minutes = Math.min(parseInt(req.query.minutes) || 2, 1440);
-        const anchorR = await pool.query('SELECT timestamp FROM realtime_data ORDER BY timestamp DESC LIMIT 1');
-        const anchorTs = anchorR.rows.length ? new Date(anchorR.rows[0].timestamp) : new Date();
-        const cutoff   = new Date(anchorTs.getTime() - minutes * 60000).toISOString();
+        let cutoff, upperBound = null;
+        if (req.query.from && req.query.to) {
+            cutoff     = new Date(req.query.from).toISOString();
+            upperBound = new Date(req.query.to).toISOString();
+        } else {
+            const minutes  = Math.min(parseInt(req.query.minutes) || 2, 1440);
+            const anchorR  = await pool.query('SELECT timestamp FROM realtime_data ORDER BY timestamp DESC LIMIT 1');
+            const anchorTs = anchorR.rows.length ? new Date(anchorR.rows[0].timestamp) : new Date();
+            cutoff = new Date(anchorTs.getTime() - minutes * 60000).toISOString();
+        }
 
         const r = await pool.query(`
-            SELECT sensor, x, y, z, timestamp
+            SELECT sensor, x, y, z, g_force, timestamp
             FROM realtime_data
-            WHERE timestamp >= $1
+            WHERE timestamp >= $1 ${upperBound ? 'AND timestamp <= $2' : ''}
             ORDER BY timestamp ASC LIMIT 30000
-        `, [cutoff]);
+        `, upperBound ? [cutoff, upperBound] : [cutoff]);
 
         const buckets = {};
         for (const doc of r.rows) {
@@ -873,12 +879,14 @@ app.get('/api/acceleration/channels', async (req, res) => {
                     const p = channelPrefixFor(id);
                     buckets[sec][`${p}v`] = null;
                     buckets[sec][`${p}l`] = null;
+                    buckets[sec][`${p}g`] = null;
                 });
             }
             if (SENSOR_IDS.includes(doc.sensor)) {
                 const p = channelPrefixFor(doc.sensor);
                 buckets[sec][`${p}v`] = doc.y != null ? +parseFloat(doc.y).toFixed(4) : null;
                 buckets[sec][`${p}l`] = doc.x != null ? +parseFloat(doc.x).toFixed(4) : null;
+                buckets[sec][`${p}g`] = doc.g_force != null ? +parseFloat(doc.g_force).toFixed(4) : null;
             }
         }
         res.json(Object.values(buckets).sort((a, b) => a.ts.localeCompare(b.ts)));

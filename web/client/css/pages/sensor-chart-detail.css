@@ -1,0 +1,75 @@
+/* sensor-chart-detail.css — standalone full-screen sensor chart page */
+
+body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #f0f2f5;
+    padding: 24px;
+    color: #1e293b;
+}
+
+.container { max-width: 1800px; margin: 0 auto; }
+
+.header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; flex-wrap: wrap; gap: 10px; }
+.header h1 { font-size: 1.8rem; color: #1e293b; font-weight: 600; display: flex; align-items: center; gap: 10px; }
+.header p { color: #64748b; margin-top: 4px; }
+
+.mode-badge {
+    padding: 4px 14px;
+    border-radius: 40px;
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: #fff;
+}
+
+.card {
+    background: white;
+    border-radius: 16px;
+    padding: 20px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+    border: 1px solid #e2e8f0;
+}
+
+.toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 16px;
+}
+
+.toolbar input[type="text"] {
+    padding: 4px 8px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    width: 170px;
+    cursor: pointer;
+}
+
+.graph-btn {
+    padding: 6px 14px;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    background: white;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: all 0.2s;
+}
+.graph-btn:hover { background: #f8fafc; border-color: #22c55e; color: #22c55e; }
+.graph-btn.primary { background: #0891b2; color: #fff; border-color: #0891b2; }
+.graph-btn.primary:hover { background: #0e7490; color: #fff; }
+
+.chart-msg {
+    display: none;
+    text-align: center;
+    padding: 10px;
+    font-size: 0.85rem;
+    color: #64748b;
+}
+
+.chart-container {
+    height: 70vh;
+    min-height: 420px;
+    width: 100%;
+    position: relative;
+}

@@ -283,3 +283,9 @@ socket.on('disconnect', () => console.warn('[mgmt] Disconnected'));
 socket.on('accelerometer-data', data => {
     pushChartPoint(data.sensor, data.peak ?? data.gForce ?? 0);
 });
+
+// ── View Details — opens the full-screen sensor chart in a new browser tab ──
+function openSensorChartDetail() {
+    window.open(`${API}/pages/sensor-chart-detail.html`, '_blank');
+}
+window.openSensorChartDetail = openSensorChartDetail;

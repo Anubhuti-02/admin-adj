@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sensor Chart Detail - Datalogger</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/flatpickr"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css">
+    <link rel="stylesheet" href="../css/common.css">
+    <link rel="stylesheet" href="../css/pages/sensor-chart-detail.css">
+    <style>
+        /* Green dot under dates that have data */
+        .flatpickr-day.has-data { position: relative; font-weight: 600; color: #15803d !important; }
+        .flatpickr-day.has-data::after {
+            content: '';
+            position: absolute;
+            bottom: 3px; left: 50%; transform: translateX(-50%);
+            width: 5px; height: 5px;
+            border-radius: 50%;
+            background: #22c55e;
+        }
+        .flatpickr-day.has-data.selected,
+        .flatpickr-day.has-data.startRange,
+        .flatpickr-day.has-data.endRange { color: #fff !important; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div>
+                <h1><i class="fas fa-chart-line"></i> Sensor Performance — Detail View</h1>
+                <p>Left / Right / Pivot g-force — zoom, pan, and browse history</p>
+            </div>
+            <div class="mode-badge" id="modeBadge" style="background:#22c55e;">● LIVE</div>
+        </div>
+
+        <div class="card">
+            <div class="toolbar">
+                <input type="text" id="histFrom" placeholder="From date & time" readonly>
+                <span style="font-size:0.8rem;color:#64748b;">→</span>
+                <input type="text" id="histTo" placeholder="To date & time" readonly>
+                <button class="graph-btn primary" onclick="loadHistoricalRange()">Load History</button>
+                <button class="graph-btn" onclick="backToLive()">Back to Live</button>
+                <button class="graph-btn" onclick="resetDetailZoom()">Zoom Reset</button>
+                <button class="graph-btn" onclick="exportChartPNG()"><i class="fas fa-download"></i> Export PNG</button>
+            </div>
+            <div class="chart-msg" id="chartMsg"></div>
+            <div class="chart-container">
+                <canvas id="detailChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script src="../js/common.js"></script>
+    <script src="../js/pages/sensor-chart-detail.js"></script>
+    <script>
+    (async () => {
+        let dataDays = new Set();
+        try {
+            const r = await fetch('/api/dates-with-data');
+            const arr = await r.json();
+            dataDays = new Set(arr);
+        } catch (_) {}
+
+        const fpOpts = {
+            enableTime: true,
+            dateFormat: 'Y-m-dTH:i',
+            altInput: true,
+            altFormat: 'm/d/Y, h:i K',
+            time_24hr: false,
+            onDayCreate(_dObj, _dStr, _fp, dayElem) {
+                const iso = dayElem.dateObj.toLocaleDateString('en-CA');
+                if (dataDays.has(iso)) dayElem.classList.add('has-data');
+            }
+        };
+        flatpickr('#histFrom', fpOpts);
+        flatpickr('#histTo', fpOpts);
+    })();
+    </script>
+</body>
+</html>

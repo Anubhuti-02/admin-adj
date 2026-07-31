@@ -222,6 +222,8 @@ function showHighSeverityPopup(impact) {
 function updateGPSDisplay(location) {
     const coordEl = document.getElementById('coordinate');
     const speedEl = document.getElementById('speed');
+    const latEl   = document.getElementById('gpsLat');
+    const lonEl   = document.getElementById('gpsLon');
 
     if (location.coordinate_km !== undefined && coordEl) {
         const km  = Math.floor(location.coordinate_km);
@@ -236,6 +238,11 @@ function updateGPSDisplay(location) {
     if (spd !== undefined && speedEl) {
         speedEl.textContent = (+spd).toFixed(2) + ' km/h';
     }
+
+    const lat = location.lat ?? location.latitude;
+    const lng = location.lng ?? location.longitude;
+    if (lat != null && latEl) latEl.textContent = (+lat).toFixed(6) + '°';
+    if (lng != null && lonEl) lonEl.textContent = (+lng).toFixed(6) + '°';
 }
 
 // ── Socket.IO connection ──────────────────────────────────────────────────

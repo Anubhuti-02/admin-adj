@@ -9,6 +9,7 @@ const fs        = require('fs');
 const os        = require('os');
 const { DateTime } = require("luxon");
 const net           = require('net');
+const multer        = require('multer');
 
 // ── Timezone configuration ─────────────────────────────────────────────────
 const TIMEZONE = "Asia/Kolkata";
@@ -159,6 +160,23 @@ function saveSectionConfig(cfg) {
 }
 let sectionConfig = loadSectionConfig();
 console.log('[section] Config loaded:', JSON.stringify(sectionConfig));
+
+// ── Chainage preview — standalone, read-only comparison tool. Separate from
+// any future live chainage feature; does not touch route_config/section_config
+// or any existing report/GPS logic.
+const CHAINAGE_PREVIEW_FILE = path.join(__dirname, 'chainage_preview.json');
+function loadChainagePreview() {
+    try {
+        if (fs.existsSync(CHAINAGE_PREVIEW_FILE)) return JSON.parse(fs.readFileSync(CHAINAGE_PREVIEW_FILE, 'utf8'));
+    } catch (e) { console.error('chainage_preview.json read error:', e.message); }
+    return null;
+}
+function saveChainagePreview(data) {
+    try { fs.writeFileSync(CHAINAGE_PREVIEW_FILE, JSON.stringify(data, null, 2)); }
+    catch (e) { console.error('chainage_preview.json write error:', e.message); }
+}
+let chainagePreview = loadChainagePreview();
+console.log('[chainage-preview] Loaded:', chainagePreview ? `${chainagePreview.rows.length} rows` : 'none');
 
 // ── Report archival — on-demand export archives + continuous raw log ──────
 const REPORTS_DIR         = path.join(__dirname, 'reports');
@@ -2160,6 +2178,70 @@ app.post('/api/section-config', (req, res) => {
     console.log('[section] Config updated and saved to section_config.json');
     io.emit('section-config-changed', sectionConfig);
     res.json({ success: true, sectionConfig });
+});
+
+// ── Chainage preview — parsing helpers ──────────────────────────────────────
+// Row format: KM,Meter,FeatureCode[,Lat,Lon,] — comma-separated, optional
+// trailing comma, some rows only have 3 columns (no GPS anchor).
+function dmsToDecimal(dmsStr) {
+    const m = dmsStr.match(/(\d+)°(\d+)'([\d.]+)"?([NSEW])/);
+    if (!m) return null;
+    const [, deg, min, sec, hemi] = m;
+    let decimal = (+deg) + (+min) / 60 + (+sec) / 3600;
+    if (hemi === 'S' || hemi === 'W') decimal = -decimal;
+    return +decimal.toFixed(6);
+}
+
+function parseChainageFile(text) {
+    const rows = [];
+    for (const line of text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)) {
+        const parts = line.split(',').map(p => p.trim());
+        const km = parseInt(parts[0], 10), meter = parseInt(parts[1], 10), featureCode = parseInt(parts[2], 10);
+        if (isNaN(km) || isNaN(meter) || isNaN(featureCode)) continue; // skip header/malformed lines
+        let lat = null, lon = null;
+        if (parts[3] && parts[4]) { lat = dmsToDecimal(parts[3]); lon = dmsToDecimal(parts[4]); }
+        rows.push({ km, meter, featureCode, lat, lon });
+    }
+    return rows;
+}
+
+// featureCode === 1 = "KM Post" (confirmed against RDSO Annexure-I/II) — its
+// meter value is taken as the real terminal length of that KM number.
+function deriveKmLengths(rows) {
+    const lengths = {};
+    for (const r of rows) if (r.featureCode === 1) lengths[r.km] = r.meter;
+    return lengths;
+}
+
+const chainagePreviewUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
+
+app.get('/api/chainage-preview', (req, res) => res.json(chainagePreview));
+
+app.post('/api/chainage-preview', chainagePreviewUpload.single('file'), (req, res) => {
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded (expected field name "file")' });
+    let rows;
+    try {
+        rows = parseChainageFile(req.file.buffer.toString('utf8'));
+    } catch (e) {
+        return res.status(400).json({ error: `Parse failed: ${e.message}` });
+    }
+    if (!rows.length) return res.status(400).json({ error: 'No parseable rows found in file' });
+
+    chainagePreview = {
+        sourceFileName: req.file.originalname,
+        uploadedAt: getTimezoneTimestamp(),
+        rows,
+        kmLengths: deriveKmLengths(rows),
+    };
+    saveChainagePreview(chainagePreview);
+    console.log(`[chainage-preview] Uploaded ${req.file.originalname}: ${rows.length} rows`);
+    res.json({ success: true, chainagePreview });
+});
+
+app.delete('/api/chainage-preview', (req, res) => {
+    chainagePreview = null;
+    saveChainagePreview(chainagePreview);
+    res.json({ success: true });
 });
 
 // ── GET /api/sensors — new: lets frontend discover registered sensors dynamically

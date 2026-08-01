@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chainage Preview - Datalogger</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="../css/common.css">
+    <link rel="stylesheet" href="../css/pages/chainage-preview.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1><i class="fas fa-route"></i> Chainage Preview</h1>
+            <p>Upload a route tape (.DAT) file and compare its real KM lengths against today's fixed-record KM logic</p>
+        </div>
+
+        <div class="notice">
+            <i class="fas fa-flask"></i> This is a read-only preview/comparison tool. It does not affect the live
+            KM-wise report, GPS handling, or any stored data — it only shows what chainage-based blocks would look
+            like using a proportional split of already-recorded data (not true GPS-position placement).
+        </div>
+
+        <div class="card">
+            <h2><i class="fas fa-file-upload"></i> Upload Route Tape</h2>
+            <div class="upload-row">
+                <input type="file" id="chainageFile" accept=".dat,.txt,.csv">
+                <button class="graph-btn primary" onclick="uploadChainageFile()">Upload &amp; Parse</button>
+                <button class="graph-btn" onclick="clearChainageFile()">Clear</button>
+            </div>
+            <div class="status-line" id="uploadStatus">No file uploaded yet.</div>
+        </div>
+
+        <div class="card" id="parsedRowsCard" style="display:none;">
+            <h2><i class="fas fa-table"></i> Parsed Rows</h2>
+            <div class="scroll-table">
+                <table>
+                    <thead><tr><th>KM</th><th>Meter</th><th>Feature Code</th><th>Lat</th><th>Lon</th></tr></thead>
+                    <tbody id="parsedRowsBody"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="card" id="compareCard" style="display:none;">
+            <h2><i class="fas fa-code-compare"></i> Block Comparison</h2>
+            <div class="upload-row" style="margin-bottom:14px;">
+                <label for="reportDate" style="font-size:0.85rem;color:#64748b;">Date</label>
+                <input type="date" id="reportDate">
+                <button class="graph-btn primary" onclick="runComparison()">Compare</button>
+            </div>
+            <div class="status-line" id="compareStatus"></div>
+            <div class="compare-grid" id="compareGrid"></div>
+        </div>
+    </div>
+
+    <script src="../js/common.js"></script>
+    <script src="../js/pages/chainage-preview.js"></script>
+</body>
+</html>

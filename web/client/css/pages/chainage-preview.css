@@ -1,0 +1,76 @@
+/* chainage-preview.css — standalone read-only chainage preview page */
+
+body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #f0f2f5;
+    padding: 24px;
+    color: #1e293b;
+}
+
+.container { max-width: 1400px; margin: 0 auto; }
+
+.header { margin-bottom: 20px; }
+.header h1 { font-size: 1.8rem; color: #1e293b; font-weight: 600; display: flex; align-items: center; gap: 10px; }
+.header p { color: #64748b; margin-top: 4px; }
+
+.notice {
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    color: #92400e;
+    padding: 10px 14px;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    margin-bottom: 20px;
+}
+
+.card {
+    background: white;
+    border-radius: 16px;
+    padding: 20px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+    border: 1px solid #e2e8f0;
+    margin-bottom: 20px;
+}
+.card h2 { font-size: 1.1rem; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
+
+.upload-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+.graph-btn {
+    padding: 6px 14px;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    background: white;
+    cursor: pointer;
+    font-size: 0.85rem;
+    transition: all 0.2s;
+}
+.graph-btn:hover { background: #f8fafc; border-color: #22c55e; color: #22c55e; }
+.graph-btn.primary { background: #0891b2; color: #fff; border-color: #0891b2; }
+.graph-btn.primary:hover { background: #0e7490; color: #fff; }
+
+.status-line { font-size: 0.85rem; color: #64748b; margin-top: 10px; }
+
+table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #f1f5f9; }
+th { color: #64748b; text-transform: uppercase; font-size: 0.7rem; }
+
+.scroll-table { max-height: 320px; overflow-y: auto; border: 1px solid #f1f5f9; border-radius: 8px; }
+
+.compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.compare-col h3 { font-size: 0.95rem; margin-bottom: 8px; }
+.compare-col.today h3 { color: #64748b; }
+.compare-col.chainage h3 { color: #0891b2; }
+
+.block-chip {
+    display: inline-block;
+    padding: 3px 8px;
+    margin: 2px;
+    border-radius: 6px;
+    background: #f1f5f9;
+    font-size: 0.75rem;
+}
+.block-chip.short { background: #fef3c7; color: #92400e; }
+
+@media (max-width: 900px) {
+    .compare-grid { grid-template-columns: 1fr; }
+}

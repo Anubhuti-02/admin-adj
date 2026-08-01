@@ -1,9 +1,17 @@
 /* acceleration.js — DB-driven waveform, no Socket.IO */
 
 const API          = window.location.origin;
-const CHART_POINTS = 120; // seconds visible on chart
 const STALE_MS     = 10000; // sensor offline if no data for 10s
 let   pollMinutes  = 2;    // window sent to API (matches time range btn)
+
+// Chart width scales with the selected range — each data point is one
+// second (server buckets realtime_data per-second), so the number of
+// visible points is just the range in seconds, capped so a 24h view
+// doesn't try to render 86,400 points.
+const MAX_CHART_POINTS = 3600;
+function getChartPoints() {
+    return Math.min(pollMinutes * 60, MAX_CHART_POINTS);
+}
 
 // ── Clock ──────────────────────────────────────────────────────────────────
 function updateTimestamp() {
@@ -33,10 +41,10 @@ const ctx = document.getElementById('mainChart').getContext('2d');
 const mainChart = new Chart(ctx, {
     type: 'line',
     data: {
-        labels: Array(CHART_POINTS).fill(''),
+        labels: Array(getChartPoints()).fill(''),
         datasets: channels.map(ch => ({
             label: ch.name,
-            data: Array(CHART_POINTS).fill(null),
+            data: Array(getChartPoints()).fill(null),
             borderColor: ch.color,
             backgroundColor: 'transparent',
             borderWidth: 1.5,
@@ -91,11 +99,11 @@ async function fetchChannels() {
         if (!Array.isArray(data) || data.length === 0) {
             // No data — clear chart, show dashes, mark OFFLINE
             channels.forEach((ch, i) => {
-                mainChart.data.datasets[i].data = Array(CHART_POINTS).fill(null);
+                mainChart.data.datasets[i].data = Array(getChartPoints()).fill(null);
                 document.getElementById(ch.legendId).textContent = '— g';
                 document.getElementById(ch.metricId).textContent = '—';
             });
-            mainChart.data.labels = Array(CHART_POINTS).fill('');
+            mainChart.data.labels = Array(getChartPoints()).fill('');
             mainChart.update('none');
             document.getElementById('lastUpdate').textContent = 'No data';
             const liveDot  = document.querySelector('.live-dot');
@@ -105,9 +113,10 @@ async function fetchChannels() {
             return;
         }
 
-        // Rolling window: keep last CHART_POINTS seconds
-        const slice  = data.slice(-CHART_POINTS);
-        const pad    = CHART_POINTS - slice.length;
+        // Rolling window: keep the last N seconds, scaled to the selected range
+        const chartPoints = getChartPoints();
+        const slice  = data.slice(-chartPoints);
+        const pad    = chartPoints - slice.length;
 
         // Append 'Z' so JS treats bare ISO strings as UTC (server stores UTC without Z)
         const toUtc = ts => new Date(ts.endsWith('Z') ? ts : ts + 'Z');

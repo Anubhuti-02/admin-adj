@@ -1,17 +1,14 @@
-/* acceleration.js — DB-driven waveform, no Socket.IO */
+/* acceleration.js — DB-driven waveform, no Socket.IO
+ * Adds: axis-limit threshold dashed lines (from /api/axis-limits) and
+ * red highlighting of points/segments that cross the configured limit,
+ * plus scroll/pinch zoom + drag pan + Zoom Reset (chartjs-plugin-zoom +
+ * chartjs-plugin-annotation, same libs as sensor-chart-detail.js).
+ */
 
 const API          = window.location.origin;
+const CHART_POINTS = 120; // seconds visible on chart
 const STALE_MS     = 10000; // sensor offline if no data for 10s
 let   pollMinutes  = 2;    // window sent to API (matches time range btn)
-
-// Chart width scales with the selected range — each data point is one
-// second (server buckets realtime_data per-second), so the number of
-// visible points is just the range in seconds, capped so a 24h view
-// doesn't try to render 86,400 points.
-const MAX_CHART_POINTS = 3600;
-function getChartPoints() {
-    return Math.min(pollMinutes * 60, MAX_CHART_POINTS);
-}
 
 // ── Clock ──────────────────────────────────────────────────────────────────
 function updateTimestamp() {
@@ -27,7 +24,7 @@ function updateTimestamp() {
 setInterval(updateTimestamp, 1000);
 updateTimestamp();
 
-// ── Chart setup ───────────────────────────────────────────────────────────
+// ── Channel setup ───────────────────────────────────────────────────────
 const channels = [
     { key: 'lv', name: 'AB-L-VERT', color: '#22c55e', legendId: 'legend1', metricId: 'metric1' },
     { key: 'll', name: 'AB-L-LAT',  color: '#eab308', legendId: 'legend2', metricId: 'metric2' },
@@ -37,19 +34,115 @@ const channels = [
     { key: 'pl', name: 'PV-LAT',    color: '#0ea5e9', legendId: 'legend6', metricId: 'metric6' }
 ];
 
+// ── Axis limits (server-backed) — one g-value per axis per sensor unit ────
+// generic = Pivot, a1 = Left, a2 = Right — same shape as /api/axis-limits
+let axisLimitsData = {
+    generic: { x: null, y: null, z: null },
+    a1:      { x: null, y: null, z: null },
+    a2:      { x: null, y: null, z: null },
+};
+
+// channel key -> { unit, axis, label } — vert = y-axis, lat = x-axis, per sensor
+const CHANNEL_LIMIT_MAP = {
+    lv: { unit: 'a1',      axis: 'y', label: 'AB-L (VERT)' }, // left vert
+    ll: { unit: 'a1',      axis: 'x', label: 'AB-L (LAT)'  }, // left lat
+    rv: { unit: 'a2',      axis: 'y', label: 'AB-R (VERT)' }, // right vert
+    rl: { unit: 'a2',      axis: 'x', label: 'AB-R (LAT)'  }, // right lat
+    pv: { unit: 'generic', axis: 'y', label: 'P (VERT)'    }, // pivot vert
+    pl: { unit: 'generic', axis: 'x', label: 'P (LAT)'     }, // pivot lat
+};
+
+function getLimitFor(chKey) {
+    const map = CHANNEL_LIMIT_MAP[chKey];
+    return map ? (axisLimitsData[map.unit]?.[map.axis] ?? null) : null;
+}
+
+async function loadAxisLimits() {
+    try {
+        const res = await fetch(`${API}/api/axis-limits`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data && data.generic && data.a1 && data.a2) axisLimitsData = data;
+        rebuildAnnotations();
+    } catch (e) {
+        console.warn('[acceleration] Could not load axis limits:', e.message);
+    }
+}
+
+// Builds one dashed reference line per channel that has a configured limit.
+// Channels with no limit set are simply left out — no line drawn.
+function rebuildAnnotations() {
+    const ann = {};
+    channels.forEach(ch => {
+        const limit = getLimitFor(ch.key);
+        const map   = CHANNEL_LIMIT_MAP[ch.key];
+        if (limit == null) return;
+        ann[`limit_${ch.key}`] = {
+            type: 'line',
+            yMin: limit,
+            yMax: limit,
+            borderColor: ch.color,
+            borderWidth: 1.5,
+            borderDash: [6, 4],
+            label: {
+                display: true,
+                content: `${map.label} ${limit}g`,
+                position: 'end',
+                font: { size: 10 },
+                backgroundColor: ch.color,
+                color: '#fff',
+                padding: 3
+            }
+        };
+    });
+    mainChart.options.plugins.annotation.annotations = ann;
+    mainChart.update('none');
+}
+
+function resetAccelZoom() { mainChart.resetZoom(); }
+window.resetAccelZoom = resetAccelZoom;
+
+// ── Chart setup ───────────────────────────────────────────────────────────
 const ctx = document.getElementById('mainChart').getContext('2d');
 const mainChart = new Chart(ctx, {
     type: 'line',
     data: {
-        labels: Array(getChartPoints()).fill(''),
+        labels: Array(CHART_POINTS).fill(''),
         datasets: channels.map(ch => ({
             label: ch.name,
-            data: Array(getChartPoints()).fill(null),
+            data: Array(CHART_POINTS).fill(null),
             borderColor: ch.color,
             backgroundColor: 'transparent',
             borderWidth: 1.5,
             tension: 0.3,
-            pointRadius: 0,
+            pointRadius: ctx => {
+                const limit = getLimitFor(ch.key);
+                const v = ctx.parsed?.y;
+                return (limit != null && v != null && Math.abs(v) >= limit) ? 4 : 0;
+            },
+            pointBackgroundColor: ctx => {
+                const limit = getLimitFor(ch.key);
+                const v = ctx.parsed?.y;
+                return (limit != null && v != null && Math.abs(v) >= limit) ? '#dc2626' : ch.color;
+            },
+            pointBorderColor: '#fff',
+            pointBorderWidth: 1,
+            segment: {
+                borderColor: sctx => {
+                    const limit = getLimitFor(ch.key);
+                    if (limit == null) return ch.color;
+                    const v0 = sctx.p0.parsed.y, v1 = sctx.p1.parsed.y;
+                    const v = Math.max(Math.abs(v0 ?? 0), Math.abs(v1 ?? 0));
+                    return v >= limit ? '#dc2626' : ch.color;
+                },
+                borderWidth: sctx => {
+                    const limit = getLimitFor(ch.key);
+                    if (limit == null) return 1.5;
+                    const v0 = sctx.p0.parsed.y, v1 = sctx.p1.parsed.y;
+                    const v = Math.max(Math.abs(v0 ?? 0), Math.abs(v1 ?? 0));
+                    return v >= limit ? 3 : 1.5;
+                }
+            },
             spanGaps: true
         }))
     },
@@ -70,7 +163,17 @@ const mainChart = new Chart(ctx, {
                 callbacks: {
                     label: ctx => `${ctx.dataset.label}: ${ctx.parsed.y != null ? ctx.parsed.y.toFixed(4) + ' g' : '—'}`
                 }
-            }
+            },
+            zoom: {
+                pan: { enabled: true, mode: 'x' },
+                zoom: {
+                    wheel: { enabled: true },
+                    pinch: { enabled: true },
+                    mode: 'x'
+                },
+                limits: { x: { minRange: 15 } }
+            },
+            annotation: { annotations: {} }
         },
         scales: {
             y: {
@@ -99,11 +202,11 @@ async function fetchChannels() {
         if (!Array.isArray(data) || data.length === 0) {
             // No data — clear chart, show dashes, mark OFFLINE
             channels.forEach((ch, i) => {
-                mainChart.data.datasets[i].data = Array(getChartPoints()).fill(null);
+                mainChart.data.datasets[i].data = Array(CHART_POINTS).fill(null);
                 document.getElementById(ch.legendId).textContent = '— g';
                 document.getElementById(ch.metricId).textContent = '—';
             });
-            mainChart.data.labels = Array(getChartPoints()).fill('');
+            mainChart.data.labels = Array(CHART_POINTS).fill('');
             mainChart.update('none');
             document.getElementById('lastUpdate').textContent = 'No data';
             const liveDot  = document.querySelector('.live-dot');
@@ -113,10 +216,9 @@ async function fetchChannels() {
             return;
         }
 
-        // Rolling window: keep the last N seconds, scaled to the selected range
-        const chartPoints = getChartPoints();
-        const slice  = data.slice(-chartPoints);
-        const pad    = chartPoints - slice.length;
+        // Rolling window: keep last CHART_POINTS seconds
+        const slice  = data.slice(-CHART_POINTS);
+        const pad    = CHART_POINTS - slice.length;
 
         // Append 'Z' so JS treats bare ISO strings as UTC (server stores UTC without Z)
         const toUtc = ts => new Date(ts.endsWith('Z') ? ts : ts + 'Z');
@@ -197,5 +299,8 @@ function setTimeRange(range, btn) {
 window.setTimeRange = setTimeRange;
 
 // ── Start polling ──────────────────────────────────────────────────────────
+loadAxisLimits();
+setInterval(loadAxisLimits, 5000); // stay in sync if Configuration page changes limits
+
 fetchChannels();
 setInterval(fetchChannels, 3000);

@@ -262,3 +262,50 @@ h1 { font-size: 2.5rem; color: #1e293b; margin-bottom: 8px; font-weight: 700; }
 @media (max-width: 900px) {
     .priority-grid { grid-template-columns: 1fr; }
 }
+/* ── Single-value axis limits (X/Y/Z) — one number per axis, mirrors threshold-input ── */
+.axis-limit-single-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin-bottom: 14px;
+}
+
+.axis-limit-single {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.axis-limit-single label {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #64748b;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.axis-limit-single.axis-x label { color: #ef4444; }
+.axis-limit-single.axis-y label { color: #22c55e; }
+.axis-limit-single.axis-z label { color: #3b82f6; }
+
+.axis-limit-single input {
+    padding: 10px 12px;
+    border: 2px solid #e2e8f0;
+    border-radius: 10px;
+    font-size: 1rem;
+    transition: all 0.2s;
+}
+.axis-limit-single input:focus { outline: none; border-color: #22c55e; box-shadow: 0 0 0 3px rgba(34,197,94,0.1); }
+
+.axis-limit-current {
+    font-size: 0.8rem;
+    color: #94a3b8;
+    font-weight: 500;
+}
+.axis-limit-current.set { color: #16a34a; font-weight: 700; }
+
+.axis-limit-save-row {
+    display: flex;
+    justify-content: flex-end;
+}

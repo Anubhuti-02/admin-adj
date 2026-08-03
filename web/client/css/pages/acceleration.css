@@ -147,6 +147,18 @@ body {
 
 .metrics-right { color: #22c55e; font-weight: 500; display: flex; align-items: center; gap: 8px; }
 
+/* Axis-limit crossed indicator — tiny grey dot under a value */
+.limit-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #94a3b8;
+    margin: 4px auto 0;
+    opacity: 0;
+    transition: opacity 0.15s;
+}
+.limit-dot.active { opacity: 1; }
+
 @media (max-width: 768px) {
     .graph-controls { flex-wrap: wrap; }
     .metrics-bar { flex-direction: column; gap: 15px; align-items: flex-start; }

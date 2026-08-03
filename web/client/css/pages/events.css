@@ -167,3 +167,18 @@ body {
 .sev-low    { color: #22c55e; }
 
 .empty { color: #94a3b8; text-align: center; padding: 48px 0; font-size: 1rem; }
+
+.axis-limit-tag {
+    display: inline-block;
+    font-size: 0.75rem;
+    font-weight: 700;
+    padding: 4px 10px;
+    border-radius: 20px;
+    white-space: nowrap;
+    letter-spacing: 0.02em;
+    transition: all 0.2s ease;
+}
+.axis-limit-tag:hover {
+    transform: scale(1.05);
+    box-shadow: 0 2px 6px rgba(0,0,0,0.15);
+}

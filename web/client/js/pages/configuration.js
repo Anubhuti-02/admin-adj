@@ -1,48 +1,38 @@
 /* configuration.js
  * Axle thresholds   → /api/thresholds        (unchanged shape, other pages still work)
  * Pivot thresholds  → /api/thresholds/pivot  (pivot classified separately)
- * Axis limits (X/Y/Z) — generic + per-accelerometer (Accel1/Accel2) — simple
- * user-defined max-threshold tag lists, stored locally (same pattern, no P1/P2/P3).
+ * Axis limits (X/Y/Z) — one g-value per axis per unit (generic/a1/a2), server-
+ * backed via /api/axis-limits. Same semantics as the threshold endpoints:
+ * a reading whose |value| >= the configured number crosses the limit.
+ * Saving one unit's X/Y/Z sends 3 POSTs (one per axis); Reset deletes every
+ * saved value and the server falls back to its 0.5g default.
  */
 
-let axisLimits = { x: [], y: [], z: [] };
 const AXES = ['x', 'y', 'z'];
+const AXIS_UNIT_PREFIX = { generic: 'Gen', a1: 'A1', a2: 'A2' };
 
-const AXIS_LIMIT_KEYS = { x: 'railmonitor_limits_x', y: 'railmonitor_limits_y', z: 'railmonitor_limits_z' };
-const DEFAULT_AXIS_LIMITS = [2, 4, 6, 8, 10, 15, 20];
-
-function loadAxisLimits(axis) {
-    try {
-        const saved = localStorage.getItem(AXIS_LIMIT_KEYS[axis]);
-        return saved ? JSON.parse(saved) : [...DEFAULT_AXIS_LIMITS];
-    } catch (e) { return [...DEFAULT_AXIS_LIMITS]; }
-}
-function saveAxisLimits(axis, arr) {
-    localStorage.setItem(AXIS_LIMIT_KEYS[axis], JSON.stringify(arr));
-}
-
-// ── Accel1 / Accel2 per-axis limit lists (same pattern as generic axisLimits) ──
-let accelAxisLimits = {
-    a1: { x: [], y: [], z: [] },
-    a2: { x: [], y: [], z: [] }
+// axisLimitsData mirrors the server shape exactly: { generic:{x,y,z}, a1:{x,y,z}, a2:{x,y,z} }
+// — each leaf is a single number (or null if somehow unset).
+let axisLimitsData = {
+    generic: { x: null, y: null, z: null },
+    a1:      { x: null, y: null, z: null },
+    a2:      { x: null, y: null, z: null }
 };
 
-const ACCEL_AXIS_LIMIT_KEYS = {
-    a1: { x: 'railmonitor_limits_a1_x', y: 'railmonitor_limits_a1_y', z: 'railmonitor_limits_a1_z' },
-    a2: { x: 'railmonitor_limits_a2_x', y: 'railmonitor_limits_a2_y', z: 'railmonitor_limits_a2_z' }
-};
-
-function loadAccelAxisLimits(unit, axis) {
+async function fetchAxisLimits() {
     try {
-        const saved = localStorage.getItem(ACCEL_AXIS_LIMIT_KEYS[unit][axis]);
-        return saved ? JSON.parse(saved) : [...DEFAULT_AXIS_LIMITS];
-    } catch (e) { return [...DEFAULT_AXIS_LIMITS]; }
-}
-function saveAccelAxisLimitsToStorage(unit, axis, arr) {
-    localStorage.setItem(ACCEL_AXIS_LIMIT_KEYS[unit][axis], JSON.stringify(arr));
+        const res = await fetch('/api/axis-limits');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (data && data.generic && data.a1 && data.a2) axisLimitsData = data;
+        console.log('[config] Axis limits loaded from server:', axisLimitsData);
+    } catch (e) {
+        console.warn('[config] Could not load axis limits:', e.message);
+        showError('Could not load axis limits from server. Is the server running?');
+    }
 }
 
-// ── Boot: fetch axle + pivot thresholds from server, populate inputs ──────
+// ── Boot: fetch axle + pivot thresholds and axis limits from server ───────
 async function loadConfig() {
     let axle  = { p1Min: null, p1Max: null, p2Min: null, p2Max: null, p3Min: null };
     let pivot = { p1Min: null, p1Max: null, p2Min: null, p2Max: null, p3Min: null };
@@ -69,15 +59,7 @@ async function loadConfig() {
     setInputs('', axle);
     setInputs('pv-', pivot);
 
-    axisLimits.x = loadAxisLimits('x');
-    axisLimits.y = loadAxisLimits('y');
-    axisLimits.z = loadAxisLimits('z');
-
-    ['a1', 'a2'].forEach(unit => {
-        AXES.forEach(axis => {
-            accelAxisLimits[unit][axis] = loadAccelAxisLimits(unit, axis);
-        });
-    });
+    await fetchAxisLimits();
 
     updateUI(axle, pivot);
 }
@@ -98,11 +80,7 @@ function updateUI(axle, pivot) {
     updateRanges('', axle);
     updateRanges('pv-', pivot);
 
-    displayAxisLimits('x');
-    displayAxisLimits('y');
-    displayAxisLimits('z');
-
-    ['a1', 'a2'].forEach(unit => AXES.forEach(axis => displayAccelAxisLimits(unit, axis)));
+    Object.keys(AXIS_UNIT_PREFIX).forEach(unit => displayAxisLimitUnit(unit));
 
     displayCurrentConfig(axle,  'configBadges');
     displayCurrentConfig(pivot, 'pivotConfigBadges');
@@ -146,65 +124,57 @@ function displayCurrentConfig(t, badgesElId) {
     ` : `<div class="config-badge-item" style="color:#94a3b8;">No thresholds configured yet — enter values and save.</div>`;
 }
 
-// ── Generic Axis Limit Values (unchanged) ──────────────────────────────────
-function displayAxisLimits(axis) {
-    const c = document.getElementById(`limitsContainer${axis.toUpperCase()}`);
-    if (!c) return;
-    c.innerHTML = axisLimits[axis].map(l => `
-        <div class="limit-tag">
-            <span>${l}g</span>
-            <button onclick="removeAxisLimit('${axis}', ${l})" title="Remove">&times;</button>
-        </div>`).join('');
+// ── Single-value Axis Limits — one number per axis per unit ────────────────
+// Populates the X/Y/Z inputs + "Current: —" labels for one unit from
+// axisLimitsData (called on load and whenever the server pushes an update).
+function displayAxisLimitUnit(unit) {
+    const prefix = AXIS_UNIT_PREFIX[unit];
+    AXES.forEach(axis => {
+        const input   = document.getElementById(`axisLimit${prefix}${axis.toUpperCase()}`);
+        const current = document.getElementById(`axisLimit${prefix}${axis.toUpperCase()}Current`);
+        const v = axisLimitsData[unit] && axisLimitsData[unit][axis];
+        if (input && document.activeElement !== input) input.value = v ?? '';
+        if (current) {
+            if (v != null) { current.textContent = `Current: ${v}g`; current.classList.add('set'); }
+            else            { current.textContent = 'Current: —';     current.classList.remove('set'); }
+        }
+    });
 }
 
-function addAxisLimit(axis) {
-    const input = document.getElementById(`newLimit${axis.toUpperCase()}`);
-    const v     = parseFloat(input.value);
-    if (isNaN(v) || v <= 0)              { showError(`Enter a valid ${axis.toUpperCase()}-axis limit`); return; }
-    if (axisLimits[axis].includes(v))    { showError('This limit already exists'); return; }
-    axisLimits[axis].push(v);
-    axisLimits[axis].sort((a,b) => a-b);
-    displayAxisLimits(axis);
-    input.value = '';
-    hideError();
-}
+// Reads the three X/Y/Z inputs for one unit and POSTs each axis that has a
+// valid positive value. Mirrors /api/thresholds's "one object per Save
+// click" pattern rather than the old per-keystroke Add/Remove.
+async function saveAxisLimit(unit) {
+    const prefix = AXIS_UNIT_PREFIX[unit];
+    const values = {};
+    for (const axis of AXES) {
+        const input = document.getElementById(`axisLimit${prefix}${axis.toUpperCase()}`);
+        const raw   = input ? input.value.trim() : '';
+        if (raw === '') continue; // leave that axis's saved value untouched
+        const v = parseFloat(raw);
+        if (isNaN(v) || v <= 0) { showError(`Enter a valid positive ${axis.toUpperCase()}-axis limit`); return; }
+        values[axis] = v;
+    }
+    if (!Object.keys(values).length) { showError('Enter at least one axis value to save'); return; }
 
-function removeAxisLimit(axis, limit) {
-    if (axisLimits[axis].length <= 1) { showError(`Must have at least one ${axis.toUpperCase()}-axis limit`); return; }
-    axisLimits[axis] = axisLimits[axis].filter(l => l !== limit);
-    displayAxisLimits(axis);
-    hideError();
-}
-
-// ── Accel1 / Accel2 Axis Limit Values (new — same pattern, per accelerometer) ──
-function displayAccelAxisLimits(unit, axis) {
-    const containerId = `limitsContainer${unit.toUpperCase()}${axis.toUpperCase()}`;
-    const c = document.getElementById(containerId);
-    if (!c) return;
-    c.innerHTML = accelAxisLimits[unit][axis].map(l => `
-        <div class="limit-tag">
-            <span>${l}g</span>
-            <button onclick="removeAccelAxisLimit('${unit}','${axis}', ${l})" title="Remove">&times;</button>
-        </div>`).join('');
-}
-
-function addAccelAxisLimit(unit, axis) {
-    const input = document.getElementById(`newLimit${unit.toUpperCase()}${axis.toUpperCase()}`);
-    const v     = parseFloat(input.value);
-    if (isNaN(v) || v <= 0) { showError(`Enter a valid ${axis.toUpperCase()}-axis limit`); return; }
-    if (accelAxisLimits[unit][axis].includes(v)) { showError('This limit already exists'); return; }
-    accelAxisLimits[unit][axis].push(v);
-    accelAxisLimits[unit][axis].sort((a,b) => a-b);
-    displayAccelAxisLimits(unit, axis);
-    input.value = '';
-    hideError();
-}
-
-function removeAccelAxisLimit(unit, axis, limit) {
-    if (accelAxisLimits[unit][axis].length <= 1) { showError(`Must have at least one ${axis.toUpperCase()}-axis limit`); return; }
-    accelAxisLimits[unit][axis] = accelAxisLimits[unit][axis].filter(l => l !== limit);
-    displayAccelAxisLimits(unit, axis);
-    hideError();
+    try {
+        for (const [axis, value] of Object.entries(values)) {
+            const res  = await fetch('/api/axis-limits', {
+                method:  'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body:    JSON.stringify({ unit, axis, value })
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+            axisLimitsData = data.axisLimits;
+        }
+        displayAxisLimitUnit(unit);
+        hideError();
+        const msg = document.getElementById('successMessage');
+        if (msg) { msg.style.display = 'flex'; setTimeout(() => msg.style.display = 'none', 4000); }
+    } catch (e) {
+        showError(`Could not save axis limits: ${e.message}`);
+    }
 }
 
 // ── Input live preview ────────────────────────────────────────────────────
@@ -229,7 +199,8 @@ function validateThresholds(prefix, label) {
     return t;
 }
 
-// ── Save ──────────────────────────────────────────────────────────────────
+// ── Save — thresholds (P1/P2/P3) only. Axis limits save independently via
+// their own "Save … Limits" button next to each unit's inputs. ────────────
 async function saveAllConfig() {
     const axle  = validateThresholds('', 'Axle');
     if (!axle) return;
@@ -256,20 +227,13 @@ async function saveAllConfig() {
         return;
     }
 
-    saveAxisLimits('x', axisLimits.x);
-    saveAxisLimits('y', axisLimits.y);
-    saveAxisLimits('z', axisLimits.z);
-
-    ['a1', 'a2'].forEach(unit => {
-        AXES.forEach(axis => saveAccelAxisLimitsToStorage(unit, axis, accelAxisLimits[unit][axis]));
-    });
-
     hideError();
     const msg = document.getElementById('successMessage');
     if (msg) { msg.style.display = 'flex'; setTimeout(() => msg.style.display = 'none', 4000); }
 }
 
-// ── Clear ─────────────────────────────────────────────────────────────────
+// ── Clear — resets thresholds AND deletes every saved axis-limit value,
+// falling the latter back to the server's 0.5g default. ────────────────────
 async function resetToDefault() {
     try {
         const res = await fetch('/api/thresholds', { method: 'DELETE' });
@@ -293,11 +257,11 @@ async function resetToDefault() {
         ['p1Min','p1Max','p2Min','p2Max','p3Min'].forEach(id => { document.getElementById(id).value = ''; });
         setInputs('pv-', pvData.thresholds);
 
-        axisLimits = { x: [...DEFAULT_AXIS_LIMITS], y: [...DEFAULT_AXIS_LIMITS], z: [...DEFAULT_AXIS_LIMITS] };
-        accelAxisLimits = {
-            a1: { x: [...DEFAULT_AXIS_LIMITS], y: [...DEFAULT_AXIS_LIMITS], z: [...DEFAULT_AXIS_LIMITS] },
-            a2: { x: [...DEFAULT_AXIS_LIMITS], y: [...DEFAULT_AXIS_LIMITS], z: [...DEFAULT_AXIS_LIMITS] }
-        };
+        // Deletes every user-saved axis limit — server resets each axis to 0.5g
+        const axRes = await fetch('/api/axis-limits', { method: 'DELETE' });
+        if (!axRes.ok) throw new Error(`HTTP ${axRes.status} on /api/axis-limits`);
+        const axData = await axRes.json();
+        axisLimitsData = axData.axisLimits;
 
         updateUI(data.thresholds, pvData.thresholds);
         hideError();
@@ -319,13 +283,20 @@ function hideError() {
     if (el) el.style.display = 'none';
 }
 
+// ── Live sync with other tabs/pages editing Configuration concurrently —
+// server broadcasts on every Save/Reset ────────────────────────────────────
+if (typeof io !== 'undefined') {
+    const _cfgSocket = io(window.location.origin);
+    _cfgSocket.on('axis-limits-updated', (data) => {
+        axisLimitsData = data;
+        Object.keys(AXIS_UNIT_PREFIX).forEach(unit => displayAxisLimitUnit(unit));
+    });
+}
+
 // ── Expose to HTML onclick handlers ──────────────────────────────────────
-window.addAxisLimit         = addAxisLimit;
-window.removeAxisLimit      = removeAxisLimit;
-window.addAccelAxisLimit    = addAccelAxisLimit;
-window.removeAccelAxisLimit = removeAccelAxisLimit;
-window.saveAllConfig        = saveAllConfig;
-window.resetToDefault       = resetToDefault;
+window.saveAxisLimit  = saveAxisLimit;
+window.saveAllConfig  = saveAllConfig;
+window.resetToDefault = resetToDefault;
 
 // ── Start ─────────────────────────────────────────────────────────────────
 loadConfig();

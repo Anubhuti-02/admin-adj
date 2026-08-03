@@ -6,6 +6,9 @@
     <title>Acceleration Channels - Datalogger</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
     <link rel="stylesheet" href="../css/common.css">
     <link rel="stylesheet" href="../css/pages/acceleration.css">
 </head>
@@ -69,6 +72,7 @@
                     <button class="graph-btn" onclick="setTimeRange('1h',this)">1H</button>
                     <button class="graph-btn" onclick="setTimeRange('6h',this)">6H</button>
                     <button class="graph-btn" onclick="setTimeRange('24h',this)">24H</button>
+                    <button class="graph-btn" onclick="resetAccelZoom()">Zoom Reset</button>
                 </div>
             </div>
             <div class="main-chart">
@@ -142,6 +146,42 @@
                     <div class="metric-dot dot-pvlat"></div>
                     <span class="metric-name">PV-LAT:</span>
                     <span class="metric-value" id="metric6">—</span>
+                </div>
+                <div class="metric-item">
+                    <div class="metric-dot dot-ablvert"></div>
+                    <span class="metric-name">AB-L-VERT:</span>
+                    <span class="metric-value" id="metric1">2.46</span>
+                    <span class="limit-dot" id="metricDot1"></span>
+                </div>
+                <div class="metric-item">
+                    <div class="metric-dot dot-abllat"></div>
+                    <span class="metric-name">AB-L-LAT:</span>
+                    <span class="metric-value" id="metric2">0.64</span>
+                    <span class="limit-dot" id="metricDot2"></span>
+                </div>
+                <div class="metric-item">
+                    <div class="metric-dot dot-abrvert"></div>
+                    <span class="metric-name">AB-R-VERT:</span>
+                    <span class="metric-value" id="metric3">0.46</span>
+                    <span class="limit-dot" id="metricDot3"></span>
+                </div>
+                <div class="metric-item">
+                    <div class="metric-dot dot-abrlat"></div>
+                    <span class="metric-name">AB-R-LAT:</span>
+                    <span class="metric-value" id="metric4">0.10</span>
+                    <span class="limit-dot" id="metricDot4"></span>
+                </div>
+                <div class="metric-item">
+                    <div class="metric-dot dot-pvvert"></div>
+                    <span class="metric-name">PV-VERT:</span>
+                    <span class="metric-value" id="metric5">—</span>
+                    <span class="limit-dot" id="metricDot5"></span>
+                </div>
+                <div class="metric-item">
+                    <div class="metric-dot dot-pvlat"></div>
+                    <span class="metric-name">PV-LAT:</span>
+                    <span class="metric-value" id="metric6">—</span>
+                    <span class="limit-dot" id="metricDot6"></span>
                 </div>
             </div>
             <div class="metrics-right">

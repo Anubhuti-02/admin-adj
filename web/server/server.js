@@ -89,6 +89,56 @@ function shouldEmit(sensorId) {
 // ── Persistent JSON fallback ──────────────────────────────────────────────
 const PEAKS_LOG_FILE     = path.join(__dirname, 'peaks_log.json');
 const LIMITS_CONFIG_FILE = path.join(__dirname, 'limits_config.json');
+const AXIS_LIMITS_FILE = path.join(__dirname, 'axis_limits.json');
+const DEFAULT_AXIS_LIMIT = 0.5; // single g-value floor per axis, same idea as p1Min for thresholds
+
+function defaultAxisLimitsShape() {
+    return {
+        generic: { x: DEFAULT_AXIS_LIMIT, y: DEFAULT_AXIS_LIMIT, z: DEFAULT_AXIS_LIMIT },
+        a1:      { x: DEFAULT_AXIS_LIMIT, y: DEFAULT_AXIS_LIMIT, z: DEFAULT_AXIS_LIMIT },
+        a2:      { x: DEFAULT_AXIS_LIMIT, y: DEFAULT_AXIS_LIMIT, z: DEFAULT_AXIS_LIMIT },
+    };
+}
+
+function loadAxisLimits() {
+    try {
+        if (fs.existsSync(AXIS_LIMITS_FILE)) {
+            const saved = JSON.parse(fs.readFileSync(AXIS_LIMITS_FILE, 'utf8'));
+            // merge onto defaults so missing keys (e.g. after upgrade) don't break the UI
+            const defaults = defaultAxisLimitsShape();
+            return {
+                generic: { ...defaults.generic, ...(saved.generic || {}) },
+                a1:      { ...defaults.a1,      ...(saved.a1      || {}) },
+                a2:      { ...defaults.a2,      ...(saved.a2      || {}) },
+            };
+        }
+    } catch (e) { console.error('axis_limits.json read error:', e.message); }
+    return defaultAxisLimitsShape();
+}
+function saveAxisLimitsToFile(cfg) {
+    try { fs.writeFileSync(AXIS_LIMITS_FILE, JSON.stringify(cfg, null, 2)); }
+    catch (e) { console.error('axis_limits.json write error:', e.message); }
+}
+let axisLimitsConfig = loadAxisLimits();
+
+// ─────────────────────────────────────────────────────────────────────────
+// FIX: the impact-detection gate below used to be hardcoded at `peakVal > 2`
+// in three separate places. That meant any reading between a low configured
+// axis limit (e.g. 0.5g) and 2g never became an event row at all — it never
+// hit accelerometer_events / peaksLog / the 'new-impact' socket event — so
+// events.js had nothing to attach the axis-limit tag to. This threshold now
+// tracks the lowest currently-configured axis limit automatically, so
+// lowering a limit in the UI also lowers the detection floor.
+// ─────────────────────────────────────────────────────────────────────────
+const FALLBACK_IMPACT_DETECTION_THRESHOLD_G = 2;
+function impactDetectionThreshold() {
+    const all = [
+        ...Object.values(axisLimitsConfig.generic || {}),
+        ...Object.values(axisLimitsConfig.a1 || {}),
+        ...Object.values(axisLimitsConfig.a2 || {}),
+    ].filter(v => typeof v === 'number' && !isNaN(v) && v > 0);
+    return all.length ? Math.min(...all) : FALLBACK_IMPACT_DETECTION_THRESHOLD_G;
+}
 
 function getLocalIP() {
     const interfaces = os.networkInterfaces();
@@ -434,6 +484,20 @@ console.log('[thresholds] Loaded:', pClassThresholds);
 // ★ PIVOT CHANGE — separate threshold set + file for the pivot sensor, since
 // pivot sees fewer/smaller peaks than the axle sensors and needs its own bands.
 const PIVOT_THRESHOLDS_FILE = path.join(__dirname, 'thresholds_pivot.json');
+const AXIS_THRESHOLDS_FILE = path.join(__dirname, 'thresholds_axis.json');
+const DEFAULT_AXIS_THRESHOLD = { p1Min: 5, p1Max: 10, p2Min: 10, p2Max: 20, p3Min: 20 };
+function loadAxisThresholds() {
+    try {
+        if (fs.existsSync(AXIS_THRESHOLDS_FILE)) return JSON.parse(fs.readFileSync(AXIS_THRESHOLDS_FILE, 'utf8'));
+    } catch (e) { console.error('thresholds_axis.json read error:', e.message); }
+    return { x: { ...DEFAULT_AXIS_THRESHOLD }, y: { ...DEFAULT_AXIS_THRESHOLD }, z: { ...DEFAULT_AXIS_THRESHOLD } };
+}
+function saveAxisThresholds(t) {
+    try { fs.writeFileSync(AXIS_THRESHOLDS_FILE, JSON.stringify(t, null, 2)); }
+    catch (e) { console.error('thresholds_axis.json write error:', e.message); }
+}
+let axisThresholds = loadAxisThresholds();
+
 function loadPivotThresholds() {
     try {
         if (fs.existsSync(PIVOT_THRESHOLDS_FILE)) return JSON.parse(fs.readFileSync(PIVOT_THRESHOLDS_FILE, 'utf8'));
@@ -515,6 +579,67 @@ app.delete('/api/thresholds/pivot', (req, res) => {
     console.log('[thresholds] Pivot reset to default:', pivotClassThresholds);
     io.emit('pivot-thresholds-updated', pivotClassThresholds);
     res.json({ success: true, thresholds: pivotClassThresholds });
+});
+
+app.get('/api/thresholds/axis', (req, res) => res.json(axisThresholds));
+
+app.post('/api/thresholds/axis', (req, res) => {
+    const body = req.body || {};
+    const updated = {};
+    for (const axis of ['x', 'y', 'z']) {
+        const t = body[axis];
+        if (!t) return res.status(400).json({ error: `Missing thresholds for axis '${axis}'` });
+        const { p1Min, p1Max, p2Min, p2Max, p3Min } = t;
+        if ([p1Min, p1Max, p2Min, p2Max, p3Min].some(v => v == null || isNaN(v)))
+            return res.status(400).json({ error: `All threshold values required for axis '${axis}'` });
+        updated[axis] = { p1Min: +p1Min, p1Max: +p1Max, p2Min: +p2Min, p2Max: +p2Max, p3Min: +p3Min };
+    }
+    axisThresholds = updated;
+    saveAxisThresholds(axisThresholds);
+    console.log('[thresholds] Axis updated and saved:', axisThresholds);
+    io.emit('axis-thresholds-updated', axisThresholds);
+    res.json({ success: true, thresholds: axisThresholds });
+});
+
+app.delete('/api/thresholds/axis', (req, res) => {
+    axisThresholds = { x: { ...DEFAULT_AXIS_THRESHOLD }, y: { ...DEFAULT_AXIS_THRESHOLD }, z: { ...DEFAULT_AXIS_THRESHOLD } };
+    saveAxisThresholds(axisThresholds);
+    console.log('[thresholds] Axis reset to default:', axisThresholds);
+    io.emit('axis-thresholds-updated', axisThresholds);
+    res.json({ success: true, thresholds: axisThresholds });
+});
+
+// GET full config — { generic: {x,y,z}, a1: {x,y,z}, a2: {x,y,z} }, each value a single number
+app.get('/api/axis-limits', (req, res) => res.json(axisLimitsConfig));
+
+// POST { unit: 'generic'|'a1'|'a2', axis: 'x'|'y'|'z', value: number }
+// Sets exactly one axis's threshold, same "any reading >= value crosses the
+// limit" semantics as /api/thresholds — no list, no tags.
+app.post('/api/axis-limits', (req, res) => {
+    const { unit, axis, value } = req.body || {};
+    if (!['generic', 'a1', 'a2'].includes(unit))
+        return res.status(400).json({ error: `Invalid unit '${unit}'` });
+    if (!['x', 'y', 'z'].includes(axis))
+        return res.status(400).json({ error: `Invalid axis '${axis}'` });
+    const v = Number(value);
+    if (value == null || isNaN(v) || v <= 0)
+        return res.status(400).json({ error: 'value must be a positive number' });
+
+    axisLimitsConfig[unit][axis] = v;
+    saveAxisLimitsToFile(axisLimitsConfig);
+    console.log(`[axis-limits] Updated ${unit}.${axis}:`, v);
+    io.emit('axis-limits-updated', axisLimitsConfig);
+    res.json({ success: true, axisLimits: axisLimitsConfig });
+});
+
+// DELETE — clears any user-saved values and resets every axis back to the
+// 0.5g default (matches /api/thresholds's DELETE-resets-to-default behavior)
+app.delete('/api/axis-limits', (req, res) => {
+    axisLimitsConfig = defaultAxisLimitsShape();
+    saveAxisLimitsToFile(axisLimitsConfig);
+    console.log('[axis-limits] Reset to default (0.5g):', axisLimitsConfig);
+    io.emit('axis-limits-updated', axisLimitsConfig);
+    res.json({ success: true, axisLimits: axisLimitsConfig });
 });
 
 // ── Last health status ───────────────────────────────────────────────────
@@ -1383,7 +1508,7 @@ async function handleBinarySensorPacket(sensorMeta, message, timestamp) {
 
     // Impact detection — generic, works for any registered sensor
     const peakVal = peak || gForce;
-    if (peakVal > 2) {
+    if (peakVal > impactDetectionThreshold()) {
         // ★ PIVOT CHANGE — pass sensorId through so pivot classifies against
         // pivotClassThresholds instead of the axle bands
         const pClass   = getPClass(peakVal, sensorId);
@@ -1548,7 +1673,7 @@ mqttClient.on('message', async (topic, message) => {
         }
 
         const peakVal = peak || gForce;
-        if (peakVal > 2) {
+        if (peakVal > impactDetectionThreshold()) {
             // ★ PIVOT CHANGE — pass sensorSide through so pivot classifies
             // against pivotClassThresholds instead of the axle bands
             const pClass    = getPClass(peakVal, sensorSide);
@@ -1787,7 +1912,7 @@ async function processRawAccelReading(sensorMeta, stats, timestamp) {
     appendRawLog(sensorId, { timestamp, sensor: sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, fs, window_ms: windowMs });
 
     const peakVal = peak || gForce;
-    if (peakVal > 2) {
+    if (peakVal > impactDetectionThreshold()) {
         const pClass   = getPClass(peakVal, sensorId);
         const severity = getSeverity(peakVal, sensorId);
         const impact   = {

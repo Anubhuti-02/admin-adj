@@ -522,6 +522,7 @@ let lastHealthStatus = null;
 
 let totalDistanceM = 0;
 let lastGpsCoord   = null;
+let lastGpsFixAt   = 0; // Date.now() of the most recent GPS fix — drives the 'gps' health key
 
 // ── computeStats ──────────────────────────────────────────────────────────
 async function computeStats(hours = 24) {
@@ -1338,6 +1339,7 @@ async function handleBinarySensorPacket(sensorMeta, message, timestamp) {
     SENSORS.forEach(s => {
         inferredHealth[s.healthKey] = (now - sensorLastSeen[s.id]) < SENSOR_TIMEOUT_MS ? 'OK' : 'FAIL';
     });
+    inferredHealth.gps = (lastGpsFixAt && (now - lastGpsFixAt) < SENSOR_TIMEOUT_MS) ? 'OK' : 'FAIL';
     lastHealthStatus = inferredHealth;
     io.emit('system-health', inferredHealth);
 
@@ -1352,6 +1354,7 @@ async function handleBinarySensorPacket(sensorMeta, message, timestamp) {
         }
         const speedKmh = +(speedMs * 0.036).toFixed(2);
         lastGpsCoord = { lat, lng, speedKmh };
+        lastGpsFixAt = Date.now();
         io.emit('gps-data', { lat, lng, speedKmh, totalDistanceM, timestamp });
         if (pgReady) {
             pool.query('INSERT INTO rm_gps (timestamp, lat, lng, speed_kmh, total_distance_m) VALUES ($1,$2,$3,$4,$5)',
@@ -1478,6 +1481,7 @@ mqttClient.on('message', async (topic, message) => {
                     if (d >= 5 && d < 500) totalDistanceM += d;
                 }
                 lastGpsCoord = { lat, lng, speedKmh };
+                lastGpsFixAt = Date.now();
                 io.emit('gps-data', { lat, lng, speedKmh, totalDistanceM, timestamp });
                 if (pgReady) {
                     pool.query('INSERT INTO rm_gps (timestamp, lat, lng, speed_kmh, total_distance_m) VALUES ($1,$2,$3,$4,$5)',
@@ -1653,6 +1657,7 @@ function processGpsFix(lat, lng, speedKmh) {
         if (d >= 5 && d < 500) totalDistanceM += d;
     }
     lastGpsCoord = { lat, lng, speedKmh };
+    lastGpsFixAt = Date.now();
     io.emit('gps-data', { lat, lng, speedKmh, totalDistanceM, timestamp });
     if (pgReady) {
         pool.query('INSERT INTO rm_gps (timestamp, lat, lng, speed_kmh, total_distance_m) VALUES ($1,$2,$3,$4,$5)',
@@ -1759,6 +1764,7 @@ async function processRawAccelReading(sensorMeta, stats, timestamp) {
     SENSORS.forEach(s => {
         inferredHealth[s.healthKey] = (now - sensorLastSeen[s.id]) < SENSOR_TIMEOUT_MS ? 'OK' : 'FAIL';
     });
+    inferredHealth.gps = (lastGpsFixAt && (now - lastGpsFixAt) < SENSOR_TIMEOUT_MS) ? 'OK' : 'FAIL';
     lastHealthStatus = inferredHealth;
     io.emit('system-health', inferredHealth);
 

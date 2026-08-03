@@ -394,11 +394,7 @@ const HEALTH_COMPONENTS = [
     { key: 'adxl345_s1', id: 'healthAccel1', label: 'Accel-1 (S1)' },
     { key: 'adxl345_s2', id: 'healthAccel2', label: 'Accel-2 (S2)' },
     { key: 'adxl345_s3', id: 'healthAccel3', label: 'Accel-3 (Pivot)' },
-    { key: 'w5500',       id: 'healthComm',  label: 'Comm (W5500)' },
-    { key: 'phyLink',     id: 'healthPhy',   label: 'PHY Link' },
-    { key: 'tcp',         id: 'healthTcp',   label: 'TCP' },
-    { key: 'spi1',        id: 'healthSpi',   label: 'SPI1' },
-    { key: 'usart2',      id: 'healthUsart', label: 'USART2' },
+    { key: 'gps',        id: 'healthGps',    label: 'GPS' },
 ];
 (function buildHealthGrid() {
     const grid = document.querySelector('.health-grid');

@@ -1,7 +1,47 @@
 /**
  * sampling-frequency.js
- * Requires: accel-config.js (must be loaded first)
  */
+
+// ── Accel config store ─────────────────────────────────────────────────────
+// Small localStorage-backed store for per-accelerometer enabled/ODR state,
+// inlined here (previously an external ../js/accel-config.js that had gone
+// missing from the client/js folder, causing a 404 → ReferenceError at
+// construction time). Kept as a plain object literal, same pattern as the
+// rest of this file, instead of a separate file/module.
+const AccelConfig = {
+    STORAGE_KEY:   'adj_accel_config_v1',
+    DEFAULT_ODR_HZ: 100,
+
+    _loadAll() {
+        try {
+            const raw = localStorage.getItem(this.STORAGE_KEY);
+            if (raw) return JSON.parse(raw);
+        } catch (e) { console.error('[AccelConfig] read error:', e.message); }
+        return {};
+    },
+    _saveAll(store) {
+        try { localStorage.setItem(this.STORAGE_KEY, JSON.stringify(store)); }
+        catch (e) { console.error('[AccelConfig] write error:', e.message); }
+    },
+    _entry(store, id) {
+        const key = String(id);
+        if (!store[key]) store[key] = { enabled: true, odrHz: this.DEFAULT_ODR_HZ };
+        return store[key];
+    },
+
+    isEnabled(id) { return this._entry(this._loadAll(), id).enabled; },
+    setEnabled(id, enabled) {
+        const store = this._loadAll();
+        this._entry(store, id).enabled = !!enabled;
+        this._saveAll(store);
+    },
+    getOdr(id) { return this._entry(this._loadAll(), id).odrHz; },
+    setOdr(id, hz) {
+        const store = this._loadAll();
+        this._entry(store, id).odrHz = Number(hz);
+        this._saveAll(store);
+    },
+};
 
 const samplingRates = [
     { value: 50,  label: '50 Hz' },
@@ -129,6 +169,7 @@ function syncSF(inputId, displayId) {
 }
 syncSF('a1-sf', 'a1-sf-display');
 syncSF('a2-sf', 'a2-sf-display');
+syncSF('a3-sf', 'a3-sf-display');
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 // Returns a numeric value for a field, or null if the field is blank/empty
@@ -144,9 +185,11 @@ function collectConfig() {
     return {
         accel1: accel1.getConfig(),
         accel2: accel2.getConfig(),
+        accel3: accel3.getConfig(),
         bandpass: {
             accel1: { low: document.getElementById('a1-low').value,  high: document.getElementById('a1-high').value,  sf: document.getElementById('a1-sf').value },
             accel2: { low: document.getElementById('a2-low').value,  high: document.getElementById('a2-high').value,  sf: document.getElementById('a2-sf').value },
+            accel3: { low: document.getElementById('a3-low').value,  high: document.getElementById('a3-high').value,  sf: document.getElementById('a3-sf').value },
         },
         uml: {
             accel1: {
@@ -204,11 +247,20 @@ document.getElementById('btn-save').addEventListener('click', async () => {
     const cfg = collectConfig();
     console.log('Saving config:', JSON.stringify(cfg, null, 2));
     try {
-        // Save ODR to server
+        // Save ODR to server. If "Save as default" is checked, the server
+        // also persists this same payload as the per-sensor defaults, so a
+        // later "Reset to Default" / DELETE restores these values instead
+        // of the factory 100 Hz fallback.
+        const saveAsDefault = document.getElementById('chk-save-as-default')?.checked || false;
         const odrRes  = await fetch(`${API}/api/odr-config`, {
             method:  'POST',
             headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ accel1: cfg.accel1.odrHz, accel2: cfg.accel2.odrHz }),
+            body:    JSON.stringify({
+                accel1: cfg.accel1.odrHz,
+                accel2: cfg.accel2.odrHz,
+                accel3: cfg.accel3.odrHz,
+                setAsDefault: saveAsDefault,
+            }),
         });
         const odrData = await odrRes.json();
         if (!odrData.success) { showToast('Save failed: ' + (odrData.error || 'Unknown error'), 'error'); return; }
@@ -244,44 +296,59 @@ document.getElementById('btn-cancel').addEventListener('click', () => {
 document.getElementById('btn-reset-default')?.addEventListener('click', async () => {
     if (!confirm('Reset all settings to factory defaults?\n\nThis will set both accelerometers to 100 Hz ODR and restore bandpass filters.')) return;
 
-    // Reset ODR on server first so all pages take effect immediately
+    // Reset ODR on server first so all pages take effect immediately.
+    // Uses DELETE so this restores the user's saved default ODR per sensor
+    // (set via "Save as Default"), not a hardcoded 100 Hz.
+    let odrAfterReset = { accel1: 100, accel2: 100, accel3: 100 };
     try {
-        await fetch(`${API}/api/odr-config`, {
-            method:  'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body:    JSON.stringify({ accel1: 100, accel2: 100 }),
-        });
+        const resetRes  = await fetch(`${API}/api/odr-config`, { method: 'DELETE' });
+        const resetData = await resetRes.json();
+        if (!resetData.success) { showToast('Reset failed: ' + (resetData.error || 'Unknown error'), 'error'); return; }
+        odrAfterReset = resetData.odrConfig;
     } catch (e) {
         showToast('Reset failed: ' + e.message, 'error');
         return;
     }
 
-    // Reset shared config
-    AccelConfig.setOdr(1, 100);
-    AccelConfig.setOdr(2, 100);
+    // Reset shared config — use whatever the server just restored from its
+    // saved defaults for each sensor, falling back to 100 Hz if unset.
+    const r1 = odrAfterReset.accel1 || 100;
+    const r2 = odrAfterReset.accel2 || 100;
+    const r3 = odrAfterReset.accel3 || 100;
+
+    AccelConfig.setOdr(1, r1);
+    AccelConfig.setOdr(2, r2);
+    AccelConfig.setOdr(3, r3);
     AccelConfig.setEnabled(1, true);
     AccelConfig.setEnabled(2, true);
+    AccelConfig.setEnabled(3, true);
 
     // Re-render ODR cards
-    accel1.currentRate = 100;
-    accel2.currentRate = 100;
+    accel1.currentRate = r1;
+    accel2.currentRate = r2;
+    accel3.currentRate = r3;
     accel1._renderStatus();
     accel2._renderStatus();
+    accel3._renderStatus();
     accel1.dropdownEl.querySelectorAll('.select-option').forEach((el, i) => {
-        el.classList.toggle('selected', samplingRates[i].value === 100);
+        el.classList.toggle('selected', samplingRates[i].value === r1);
     });
     accel2.dropdownEl.querySelectorAll('.select-option').forEach((el, i) => {
-        el.classList.toggle('selected', samplingRates[i].value === 100);
+        el.classList.toggle('selected', samplingRates[i].value === r2);
+    });
+    accel3.dropdownEl.querySelectorAll('.select-option').forEach((el, i) => {
+        el.classList.toggle('selected', samplingRates[i].value === r3);
     });
 
     // Reset bandpass inputs
-    const bpDefaults = { 'a1-low': 0.3, 'a1-high': 10, 'a1-sf': 200, 'a2-low': 0.3, 'a2-high': 50, 'a2-sf': 200 };
+    const bpDefaults = { 'a1-low': 0.3, 'a1-high': 10, 'a1-sf': 200, 'a2-low': 0.3, 'a2-high': 50, 'a2-sf': 200, 'a3-low': 0.3, 'a3-high': 10, 'a3-sf': 200 };
     Object.entries(bpDefaults).forEach(([id, val]) => {
         const el = document.getElementById(id);
         if (el) el.value = val;
     });
     syncSF('a1-sf', 'a1-sf-display');
     syncSF('a2-sf', 'a2-sf-display');
+    syncSF('a3-sf', 'a3-sf-display');
 
     showToast('Reset to factory defaults.');
 
@@ -309,6 +376,7 @@ document.getElementById('btn-reset-default')?.addEventListener('click', async ()
 // ── Init ──────────────────────────────────────────────────────────────────────
 const accel1 = new Accelerometer(1, 'blue');
 const accel2 = new Accelerometer(2, 'purple');
+const accel3 = new Accelerometer(3, 'amber');
 
 // Shared helper — populates a field only if the server returned a non-null value
 function restoreField(id, v) {
@@ -320,7 +388,7 @@ function restoreField(id, v) {
 fetch(`${API}/api/odr-config`)
     .then(r => r.json())
     .then(cfg => {
-        [{ inst: accel1, id: 1, key: 'accel1' }, { inst: accel2, id: 2, key: 'accel2' }].forEach(({ inst, id, key }) => {
+        [{ inst: accel1, id: 1, key: 'accel1' }, { inst: accel2, id: 2, key: 'accel2' }, { inst: accel3, id: 3, key: 'accel3' }].forEach(({ inst, id, key }) => {
             const hz = cfg[key];
             if (!hz) return;
             AccelConfig.setOdr(id, hz);

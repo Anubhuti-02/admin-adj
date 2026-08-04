@@ -66,9 +66,50 @@ const SENSOR_IDS = SENSORS.map(s => s.id);                                   // 
 const sensorById  = id => SENSORS.find(s => s.id === id);
 const sensorByPacketType = pt => SENSORS.find(s => s.packetType === pt);
 
-// Default ODR config, generated from the registry (all default to 100 Hz)
-const odrConfig = {};
-SENSORS.forEach(s => { odrConfig[s.odrKey] = 100; });
+// ── ODR config persistence ──────────────────────────────────────────────
+// BUG FIX: odrConfig used to live only in memory (seeded with a hardcoded
+// 100 Hz for every sensor at boot) with no load/save pair, unlike every
+// other *Config object in this file (limitsConfig, routeConfig,
+// sectionConfig, ...). POSTs appeared to work for the running process, but
+// any server restart/redeploy silently threw the saved values away and
+// reset everyone back to 100 Hz — that was the "not saving" bug.
+// This also adds a persisted `odrDefaults` object so users can configure
+// their own per-sensor default (not just a hardcoded 100), which DELETE
+// now restores from instead of hardcoding.
+const ODR_CONFIG_FILE = path.join(__dirname, 'odr_config.json');
+const FALLBACK_ODR_HZ = 100;
+
+function defaultOdrShape() {
+    const shape = {};
+    SENSORS.forEach(s => { shape[s.odrKey] = FALLBACK_ODR_HZ; });
+    return shape;
+}
+
+function loadOdrConfig() {
+    const fallback = defaultOdrShape();
+    try {
+        if (fs.existsSync(ODR_CONFIG_FILE)) {
+            const saved = JSON.parse(fs.readFileSync(ODR_CONFIG_FILE, 'utf8'));
+            // merge onto defaults so a newly-added sensor in SENSORS still
+            // gets a value even if the file predates it
+            return {
+                current:  { ...fallback, ...(saved.current  || {}) },
+                defaults: { ...fallback, ...(saved.defaults || {}) },
+            };
+        }
+    } catch (e) { console.error('odr_config.json read error:', e.message); }
+    return { current: { ...fallback }, defaults: { ...fallback } };
+}
+function saveOdrConfig(cfg) {
+    try { fs.writeFileSync(ODR_CONFIG_FILE, JSON.stringify(cfg, null, 2)); }
+    catch (e) { console.error('odr_config.json write error:', e.message); }
+}
+
+let odrStore = loadOdrConfig();
+// `odrConfig` stays as the live/current values so the rest of the file
+// (shouldEmit, etc.) doesn't need to change how it reads sensor ODRs.
+const odrConfig = odrStore.current;
+console.log('[ODR] Config loaded:', JSON.stringify(odrStore));
 
 // Sensor liveness + ODR decimation counters, keyed by sensor id
 const sensorLastSeen = {};
@@ -2240,30 +2281,65 @@ app.post('/api/reports/km-wise', express.json({ limit: '15mb' }), (req, res) => 
 });
 
 // ── ODR config endpoints — now generic over SENSORS registry ──────────────
-app.get('/api/odr-config', (req, res) => res.json(odrConfig));
+// GET returns both the live values and the persisted per-sensor defaults,
+// so the frontend can show/reset against real defaults instead of a
+// hardcoded 100.
+app.get('/api/odr-config', (req, res) => res.json({ ...odrConfig, defaults: odrStore.defaults }));
 
-app.post('/api/odr-config', (req, res) => {
-    const valid = [50, 100, 200];
-    const body  = req.body || {};
+const VALID_ODR_HZ = [50, 100, 200];
+function parseOdrUpdates(body) {
     const updated = {};
-
     for (const s of SENSORS) {
         if (body[s.odrKey] !== undefined) {
-            if (!valid.includes(Number(body[s.odrKey]))) {
-                return res.status(400).json({ error: `${s.odrKey} ODR must be 50, 100, or 200 Hz` });
-            }
-            updated[s.odrKey] = Number(body[s.odrKey]);
+            const n = Number(body[s.odrKey]);
+            if (!VALID_ODR_HZ.includes(n)) return { error: `${s.odrKey} ODR must be 50, 100, or 200 Hz` };
+            updated[s.odrKey] = n;
         }
     }
+    return { updated };
+}
+
+app.post('/api/odr-config', (req, res) => {
+    const body = req.body || {};
+
+    // setAsDefault: true persists this same payload as the new defaults too
+    // (i.e. "make this the factory default"), instead of just the live value.
+    const { updated, error } = parseOdrUpdates(body);
+    if (error) return res.status(400).json({ error });
     if (!Object.keys(updated).length) {
         return res.status(400).json({ error: 'No valid sensor ODR keys provided' });
     }
 
     Object.assign(odrConfig, updated);
+    if (body.setAsDefault) Object.assign(odrStore.defaults, updated);
+
     SENSORS.forEach(s => { odrCounters[s.id] = 0; }); // reset all so next sample is accepted
-    console.log('[ODR] Updated →', odrConfig);
+    saveOdrConfig(odrStore);
+    console.log('[ODR] Updated →', odrConfig, body.setAsDefault ? '(also saved as default)' : '');
     io.emit('odr-config-changed', odrConfig);
-    res.json({ success: true, odrConfig });
+    res.json({ success: true, odrConfig, defaults: odrStore.defaults });
+});
+
+// DELETE resets ODR back to the persisted defaults — either every sensor,
+// or a single one via ?sensor=accel1. It does NOT hardcode 100 Hz; it
+// restores whatever the user last saved as their default.
+app.delete('/api/odr-config', (req, res) => {
+    const { sensor } = req.query;
+
+    if (sensor) {
+        const s = SENSORS.find(s => s.odrKey === sensor);
+        if (!s) return res.status(400).json({ error: `Unknown sensor key: ${sensor}` });
+        odrConfig[s.odrKey] = odrStore.defaults[s.odrKey];
+        odrCounters[s.id] = 0;
+    } else {
+        Object.assign(odrConfig, odrStore.defaults);
+        SENSORS.forEach(s => { odrCounters[s.id] = 0; });
+    }
+
+    saveOdrConfig(odrStore);
+    console.log('[ODR] Reset to defaults →', odrConfig);
+    io.emit('odr-config-changed', odrConfig);
+    res.json({ success: true, odrConfig, defaults: odrStore.defaults });
 });
 
 // ── Limits config endpoints (unchanged) ─────────────────────────────────

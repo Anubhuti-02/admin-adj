@@ -10,21 +10,21 @@
 
 <div class="outer-wrap">
 
-    <!-- Page Header -->
-    <div class="page-header">
-        <div class="icon-wrapper">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
-            </svg>
-        </div>
-        <div class="header-content">
-            <h1>Dual ADXL345 Configuration</h1>
-            <p>Configure sampling frequency, bandpass limits, and static test limits for both accelerometers</p>
-        </div>
-    </div>
-
     <!-- Main Panel -->
     <div class="panel">
+
+        <!-- Page Header (now inside the card) -->
+        <div class="page-header">
+            <div class="icon-wrapper">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+                </svg>
+            </div>
+            <div class="header-content">
+                <h1>Frequency Configuration</h1>
+                <p>Configure sampling frequency, bandpass limits, and static test limits for both accelerometers</p>
+            </div>
+        </div>
 
         <!-- Tab Bar -->
         <div class="tab-bar">
@@ -41,8 +41,14 @@
                     <span class="dot"></span>
                     Output Data Rate (ODR)
                 </div>
+                <p class="section-desc">
+                    Sets how many samples per second each ADXL345 accelerometer reports (50 / 100 / 200 Hz).
+                    Higher ODR captures faster impacts more precisely but increases data volume and network/DB
+                    load; lower ODR reduces load but can miss very short-duration peaks. Toggle a sensor off to
+                    stop collecting from it entirely without unplugging hardware.
+                </p>
                 <div class="section-body">
-                    <div class="cards-grid">
+                    <div class="cards-grid cards-grid-3">
 
                         <!-- Accelerometer 1 -->
                         <div class="card">
@@ -120,6 +126,44 @@
                             </div>
                         </div>
 
+                        <!-- Accelerometer 3 — Pivot -->
+                        <div class="card">
+                            <div class="card-header">
+                                <div class="card-info">
+                                    <div class="sensor-badge amber">A3</div>
+                                    <div class="sensor-info">
+                                        <h2>Accelerometer 3 (Pivot)</h2>
+                                        <p>ADXL345 Sensor</p>
+                                    </div>
+                                </div>
+                                <div class="switch" id="switch3">
+                                    <div class="switch-handle"></div>
+                                </div>
+                            </div>
+                            <div class="status-display amber" id="status3">
+                                <p class="label">Current Sampling Frequency</p>
+                                <p class="frequency amber" id="freq3">—</p>
+                            </div>
+                            <div class="control-group">
+                                <label class="control-label">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <circle cx="12" cy="12" r="3"></circle>
+                                        <path d="M12 1v6m0 6v6"></path>
+                                    </svg>
+                                    Output Data Rate (ODR)
+                                </label>
+                                <div class="custom-select">
+                                    <div class="select-trigger" id="trigger3">
+                                        <span id="selected3">—</span>
+                                        <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path d="M2 4L6 8L10 4"></path>
+                                        </svg>
+                                    </div>
+                                    <div class="select-dropdown" id="dropdown3"></div>
+                                </div>
+                            </div>
+                        </div>
+
                     </div>
                 </div>
             </div>
@@ -130,6 +174,7 @@
                     <span class="dot"></span>
                     Accelerations — Bandpass Filter Settings
                 </div>
+                <p class="section-desc"></p>
                 <div class="section-body">
 
                     <div class="filter-row">
@@ -162,6 +207,21 @@
                         <span class="sf-live sf-live-purple">→ <span id="a2-sf-display">—</span> sps</span>
                     </div>
 
+                    <div class="filter-row">
+                        <span class="filter-name">
+                            Pivot bandpass filter
+                            <span class="tag a3">A3</span>
+                        </span>
+                        <input type="number" id="a3-low"  min="0" step="0.1">
+                        <span class="filter-sep">–</span>
+                        <input type="number" id="a3-high" min="0" step="1">
+                        <span class="filter-unit">Hz</span>
+                        <span class="sf-label">Sampling Frequency</span>
+                        <input type="number" class="sf-input" id="a3-sf" min="1" step="1">
+                        <span class="sf-unit">Hz</span>
+                        <span class="sf-live sf-live-amber">→ <span id="a3-sf-display">—</span> sps</span>
+                    </div>
+
                 </div>
             </div>
 
@@ -171,6 +231,7 @@
                     <span class="dot"></span>
                     Urgent Maintenance Limit — Static Test (&lt;40 km/h)
                 </div>
+                <p class="section-desc"></p>
                 <div class="section-body">
                     <table class="uml-table">
                         <thead>
@@ -178,6 +239,7 @@
                                 <th>Parameter</th>
                                 <th>Accel 1 (g)</th>
                                 <th>Accel 2 (g)</th>
+                                <th>Pivot (g)</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -197,6 +259,13 @@
                                         <input type="number" id="uml-a2-vert-high" min="0" step="0.01" placeholder="max">
                                     </div>
                                 </td>
+                                <td>
+                                    <div class="uml-range-cell">
+                                        <input type="number" id="uml-p-vert-low"  min="0" step="0.01" placeholder="min">
+                                        <span class="range-sep">to</span>
+                                        <input type="number" id="uml-p-vert-high" min="0" step="0.01" placeholder="max">
+                                    </div>
+                                </td>
                             </tr>
                             <tr>
                                 <td class="row-label">Lateral (TRC‑P‑LAT)</td>
@@ -214,6 +283,13 @@
                                         <input type="number" id="uml-a2-lat-high" min="0" step="0.01" placeholder="max">
                                     </div>
                                 </td>
+                                <td>
+                                    <div class="uml-range-cell">
+                                        <input type="number" id="uml-p-lat-low"  min="0" step="0.01" placeholder="min">
+                                        <span class="range-sep">to</span>
+                                        <input type="number" id="uml-p-lat-high" min="0" step="0.01" placeholder="max">
+                                    </div>
+                                </td>
                             </tr>
                         </tbody>
                     </table>
@@ -227,6 +303,7 @@
                     <span class="dot"></span>
                     Limit Class — Static Test (&lt;40 km/h)
                 </div>
+                <p class="section-desc"></p>
                 <div class="section-body section-body--flush">
                     <div class="limit-table-wrap">
                         <table class="limit-class-table">
@@ -296,6 +373,31 @@
                                     <td><input type="number" id="lc-a2-vert-peak-p2" min="0" step="0.01"></td>
                                     <td><input type="number" id="lc-a2-vert-peak-p3" min="0" step="0.01"></td>
                                 </tr>
+                                <tr class="tr-pivot">
+                                    <td class="row-label">Pivot – Lateral (g)</td>
+                                    <td><input type="number" id="lc-p-lat-ri-p1" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-lat-ri-p2" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-lat-ri-p3" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-lat-rms-p1" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-lat-rms-p2" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-lat-rms-p3" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-lat-peak-p1" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-lat-peak-p2" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-lat-peak-p3" min="0" step="0.01"></td>
+                                </tr>
+                                <!-- Accel 1 Vertical -->
+                                <tr class="tr-pivot">
+                                    <td class="row-label">Pivot – Vertical (g)</td>
+                                    <td><input type="number" id="lc-p-vert-ri-p1" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-vert-ri-p2" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-vert-ri-p3" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-vert-rms-p1" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-vert-rms-p2" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-vert-rms-p3" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-vert-peak-p1" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-vert-peak-p2" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-vert-peak-p3" min="0" step="0.01"></td>
+                                </tr>
                             </tbody>
                         </table>
                     </div>
@@ -309,6 +411,7 @@
                     <span class="dot"></span>
                     Limit Class (Speed Dependent)
                 </div>
+                <p class="section-desc"></p>
                 <div class="section-body section-body--flush">
                     <div class="limit-table-wrap">
                         <table>
@@ -351,6 +454,7 @@
                                 <th>Parameter</th>
                                 <th>Accelerometer 1</th>
                                 <th>Accelerometer 2</th>
+                                <th>Pivot</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -375,6 +479,10 @@
 
         <!-- Footer -->
         <div class="footer-bar">
+            <label class="save-as-default-label" style="display:flex;align-items:center;gap:6px;margin-right:auto;font-size:13px;">
+                <input type="checkbox" id="chk-save-as-default">
+                Save as default
+            </label>
             <button class="btn btn-import" id="btn-import">Import</button>
             <button class="btn btn-save"   id="btn-save">Save</button>
             <button class="btn btn-report" id="btn-report">Report</button>
@@ -388,8 +496,7 @@
 
 <script src="/socket.io/socket.io.js"></script>
 <script src="../js/common.js"></script>
-<script src="../js/accel-config.js"></script>
 <script src="../js/pages/preload.js"></script>
 <script src="../js/pages/sampling-frequency.js"></script>
 </body>
-</html>
+</html> 

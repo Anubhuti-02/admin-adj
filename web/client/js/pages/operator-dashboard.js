@@ -438,11 +438,6 @@ const previousWarningState = {
     right: true,
     pivot: true,
     gps: true,
-    usart2: true,
-    spi1: true,
-    w5500: true,
-    tcp: true,
-    phyLink: true,
     system: true
 };
 
@@ -454,17 +449,6 @@ function formatLogTime(isoString) {
     const date = new Date(isoString);
     return date.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' }) + ' ' +
            date.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false });
-}
-
-function getDetailedCommunicationStatus() {
-    // Only called when hardware is online (any sensor active)
-    const parts = [];
-    if (healthStatus.usart2 !== undefined) parts.push(`USART: ${healthStatus.usart2 === 'OK' ? 'ok' : 'fail'}`);
-    if (healthStatus.spi1 !== undefined)   parts.push(`SPI: ${healthStatus.spi1 === 'OK' ? 'ok' : 'fail'}`);
-    if (healthStatus.w5500 !== undefined)  parts.push(`W5500: ${healthStatus.w5500 === 'OK' ? 'ok' : 'fail'}`);
-    if (healthStatus.tcp !== undefined)    parts.push(`TCP: ${healthStatus.tcp === 'OK' ? 'ok' : 'fail'}`);
-    if (healthStatus.phyLink !== undefined)parts.push(`PHY: ${healthStatus.phyLink === 'OK' ? 'ok' : 'fail'}`);
-    return parts.length ? parts.join(', ') : 'No health data';
 }
 
 function updateHardwareStatus() {
@@ -516,23 +500,7 @@ function updateHardwareStatus() {
     addEntry(pivotOnline ? 'info' : 'warning', pivotMsg, '[Accel-3]', 'pivot');
     addEntry(gpsOnline   ? 'info' : 'warning', gpsMsg,   '[GPS]', 'gps');
 
-    if (anyOnline) {
-        const healthMap = [
-            { key: 'usart2', label: '[USART]', stateKey: 'usart2' },
-            { key: 'spi1', label: '[SPI1]', stateKey: 'spi1' },
-            { key: 'w5500', label: '[W5500]', stateKey: 'w5500' },
-            { key: 'tcp', label: '[TCP]', stateKey: 'tcp' },
-            { key: 'phyLink', label: '[PHY Link]', stateKey: 'phyLink' }
-        ];
-        for (const h of healthMap) {
-            const status = healthStatus[h.key];
-            if (status !== undefined) {
-                const isOk = status === 'OK';
-                const msg = `${h.key.toUpperCase()}: ${isOk ? 'OK' : 'FAIL'}`;
-                addEntry(isOk ? 'info' : 'warning', msg, h.label, h.stateKey);
-            }
-        }
-    } else {
+    if (!anyOnline) {
         addEntry('warning', 'Communication: Not connected since the hardware is offline.', '[System]', 'system');
     }
 

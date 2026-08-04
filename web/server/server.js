@@ -90,7 +90,9 @@ function shouldEmit(sensorId) {
 const PEAKS_LOG_FILE     = path.join(__dirname, 'peaks_log.json');
 const LIMITS_CONFIG_FILE = path.join(__dirname, 'limits_config.json');
 const AXIS_LIMITS_FILE = path.join(__dirname, 'axis_limits.json');
-const DEFAULT_AXIS_LIMIT = 0.5; // single g-value floor per axis, same idea as p1Min for thresholds
+const DEFAULT_AXIS_LIMIT = 2; // single g-value floor per axis, same idea as p1Min for thresholds —
+// matches the old hardcoded impact-detection floor so out-of-the-box behavior doesn't flood the
+// Events page with near-noise readings; lower this per-axis via the UI for deliberately higher sensitivity
 
 function defaultAxisLimitsShape() {
     return {

@@ -174,12 +174,7 @@
                     <span class="dot"></span>
                     Accelerations — Bandpass Filter Settings
                 </div>
-                <p class="section-desc">
-                    Restricts each accelerometer's signal to a frequency band (Low–High Hz) before RMS/peak
-                    computation, filtering out DC drift and high-frequency electrical noise (e.g. EMI from the
-                    25kV catenary) that isn't real track-induced vibration. Sampling Frequency here is the
-                    target processing rate in samples/sec (sps) used for that filter's window.
-                </p>
+                <p class="section-desc"></p>
                 <div class="section-body">
 
                     <div class="filter-row">
@@ -236,12 +231,7 @@
                     <span class="dot"></span>
                     Urgent Maintenance Limit — Static Test (&lt;40 km/h)
                 </div>
-                <p class="section-desc">
-                    Hard g-value ceilings (min–max range) for Vertical and Lateral readings on each
-                    accelerometer, applied only while the train is moving under 40 km/h. A reading outside
-                    this range during a static test flags an urgent maintenance condition on the track or
-                    bogie — independent of the P1/P2/P3 impact classification used elsewhere.
-                </p>
+                <p class="section-desc"></p>
                 <div class="section-body">
                     <table class="uml-table">
                         <thead>
@@ -313,12 +303,7 @@
                     <span class="dot"></span>
                     Limit Class — Static Test (&lt;40 km/h)
                 </div>
-                <p class="section-desc">
-                    Per-axis, per-accelerometer P1/P2/P3 thresholds (Ride Index, RMS, Peak) used specifically
-                    for static-speed testing. These feed the Peak Distribution table on the Acceleration
-                    KM-wise page when Limit Class values are configured — otherwise that page falls back to
-                    the default 5/10/20g bands.
-                </p>
+                <p class="section-desc"></p>
                 <div class="section-body section-body--flush">
                     <div class="limit-table-wrap">
                         <table class="limit-class-table">
@@ -390,28 +375,28 @@
                                 </tr>
                                 <tr class="tr-pivot">
                                     <td class="row-label">Pivot – Lateral (g)</td>
-                                    <td><input type="number" id="lc-a1-lat-ri-p1" min="0" step="0.01"></td>
-                                    <td><input type="number" id="lc-a1-lat-ri-p2" min="0" step="0.01"></td>
-                                    <td><input type="number" id="lc-a1-lat-ri-p3" min="0" step="0.01"></td>
-                                    <td><input type="number" id="lc-a1-lat-rms-p1" min="0" step="0.01"></td>
-                                    <td><input type="number" id="lc-a1-lat-rms-p2" min="0" step="0.01"></td>
-                                    <td><input type="number" id="lc-a1-lat-rms-p3" min="0" step="0.01"></td>
-                                    <td><input type="number" id="lc-a1-lat-peak-p1" min="0" step="0.01"></td>
-                                    <td><input type="number" id="lc-a1-lat-peak-p2" min="0" step="0.01"></td>
-                                    <td><input type="number" id="lc-a1-lat-peak-p3" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-lat-ri-p1" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-lat-ri-p2" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-lat-ri-p3" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-lat-rms-p1" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-lat-rms-p2" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-lat-rms-p3" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-lat-peak-p1" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-lat-peak-p2" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-lat-peak-p3" min="0" step="0.01"></td>
                                 </tr>
                                 <!-- Accel 1 Vertical -->
                                 <tr class="tr-pivot">
                                     <td class="row-label">Pivot – Vertical (g)</td>
-                                    <td><input type="number" id="lc-a1-vert-ri-p1" min="0" step="0.01"></td>
-                                    <td><input type="number" id="lc-a1-vert-ri-p2" min="0" step="0.01"></td>
-                                    <td><input type="number" id="lc-a1-vert-ri-p3" min="0" step="0.01"></td>
-                                    <td><input type="number" id="lc-a1-vert-rms-p1" min="0" step="0.01"></td>
-                                    <td><input type="number" id="lc-a1-vert-rms-p2" min="0" step="0.01"></td>
-                                    <td><input type="number" id="lc-a1-vert-rms-p3" min="0" step="0.01"></td>
-                                    <td><input type="number" id="lc-a1-vert-peak-p1" min="0" step="0.01"></td>
-                                    <td><input type="number" id="lc-a1-vert-peak-p2" min="0" step="0.01"></td>
-                                    <td><input type="number" id="lc-a1-vert-peak-p3" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-vert-ri-p1" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-vert-ri-p2" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-vert-ri-p3" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-vert-rms-p1" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-vert-rms-p2" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-vert-rms-p3" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-vert-peak-p1" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-vert-peak-p2" min="0" step="0.01"></td>
+                                    <td><input type="number" id="lc-p-vert-peak-p3" min="0" step="0.01"></td>
                                 </tr>
                             </tbody>
                         </table>
@@ -426,11 +411,7 @@
                     <span class="dot"></span>
                     Limit Class (Speed Dependent)
                 </div>
-                <p class="section-desc">
-                    Same P1/P2/P3 classification (Peak, RMS, Peak Hi) but banded by running speed rather than
-                    a single static threshold — each row applies at a different speed range. Not yet wired to
-                    a backend endpoint; values here are for reference/future use.
-                </p>
+                <p class="section-desc"></p>
                 <div class="section-body section-body--flush">
                     <div class="limit-table-wrap">
                         <table>
@@ -473,6 +454,7 @@
                                 <th>Parameter</th>
                                 <th>Accelerometer 1</th>
                                 <th>Accelerometer 2</th>
+                                <th>Pivot</th>
                             </tr>
                         </thead>
                         <tbody>

@@ -131,9 +131,7 @@ function shouldEmit(sensorId) {
 const PEAKS_LOG_FILE     = path.join(__dirname, 'peaks_log.json');
 const LIMITS_CONFIG_FILE = path.join(__dirname, 'limits_config.json');
 const AXIS_LIMITS_FILE = path.join(__dirname, 'axis_limits.json');
-const DEFAULT_AXIS_LIMIT = 2; // single g-value floor per axis, same idea as p1Min for thresholds —
-// matches the old hardcoded impact-detection floor so out-of-the-box behavior doesn't flood the
-// Events page with near-noise readings; lower this per-axis via the UI for deliberately higher sensitivity
+const DEFAULT_AXIS_LIMIT = 0.5; // single g-value floor per axis, same idea as p1Min for thresholds
 
 function defaultAxisLimitsShape() {
     return {
@@ -359,6 +357,122 @@ const pool = new Pool({
     password: process.env.PG_PASSWORD || 'uabams123',
 });
 
+// ── Email (impact alert notifications) ─────────────────────────────────────
+const nodemailer = require('nodemailer');
+const transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: process.env.SMTP_PORT || 587,
+    secure: false,
+    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+});
+
+// ── Notification config (emails + thresholds + cooldown) ──────────────────
+async function loadNotifyEmails() {
+    try {
+        // Try to get from database
+        const result = await pool.query(
+            `SELECT emails, min_severity, cooldown_sec, enabled 
+             FROM notification_config LIMIT 1`
+        );
+        if (result.rows.length) {
+            const row = result.rows[0];
+            return {
+                emails: row.emails || [],
+                minSeverity: row.min_severity || 'MEDIUM',
+                cooldownSec: row.cooldown_sec || 60,
+                enabled: row.enabled !== undefined ? row.enabled : true,
+            };
+        }
+    } catch (e) {
+        console.error('[notify] DB load error, falling back to JSON:', e.message);
+    }
+    // Fallback: read from JSON file (migration path)
+    const NOTIFY_FILE = path.join(__dirname, 'notify_emails.json');
+    try {
+        if (fs.existsSync(NOTIFY_FILE)) {
+            const data = JSON.parse(fs.readFileSync(NOTIFY_FILE, 'utf8'));
+            return data;
+        }
+    } catch (e) { /* ignore */ }
+    return { emails: [], minSeverity: 'MEDIUM', cooldownSec: 60, enabled: true };
+}
+
+async function saveNotifyEmails(cfg) {
+    try {
+        await pool.query(
+            `UPDATE notification_config 
+             SET emails = $1, 
+                 min_severity = $2, 
+                 cooldown_sec = $3, 
+                 enabled = $4,
+                 updated_at = CURRENT_TIMESTAMP
+             WHERE id = (SELECT id FROM notification_config LIMIT 1)`,
+            [cfg.emails || [], cfg.minSeverity || 'MEDIUM', cfg.cooldownSec ?? 60, cfg.enabled !== undefined ? cfg.enabled : true]
+        );
+        console.log('[notify] Config saved to DB');
+    } catch (e) {
+        console.error('[notify] DB save error, falling back to JSON:', e.message);
+        // Fallback to JSON
+        const NOTIFY_FILE = path.join(__dirname, 'notify_emails.json');
+        fs.writeFileSync(NOTIFY_FILE, JSON.stringify(cfg, null, 2));
+    }
+}
+
+let notifyConfig = { emails: [], minSeverity: 'MEDIUM', cooldownSec: 60, enabled: true };
+
+(async function initNotifyConfig() {
+    notifyConfig = await loadNotifyEmails();
+    console.log('[notify] Config loaded:', notifyConfig);
+})();
+
+const lastEmailAt = {};
+
+function severityRank(s) {
+    const map = { LOW: 1, MEDIUM: 2, HIGH: 3 };
+    return map[s] || 0;
+}
+
+async function maybeSendImpactEmail(impact) {
+     if (!notifyConfig.enabled) return;
+    if (!notifyConfig.emails.length) return;
+    if (severityRank(impact.severity) < severityRank(notifyConfig.minSeverity)) return;
+
+    const now = Date.now();
+    const last = lastEmailAt[impact.sensor] || 0;
+    if (now - last < notifyConfig.cooldownSec * 1000) return;
+    lastEmailAt[impact.sensor] = now;
+
+    const mapsLink = (lastGpsCoord?.lat && lastGpsCoord?.lng)
+        ? `https://maps.google.com/?q=${lastGpsCoord.lat},${lastGpsCoord.lng}` : 'No GPS fix';
+
+    const html = `
+        <h3>Impact Alert — ${impact.p_class || '—'} (${impact.severity})</h3>
+        <table>
+            <tr><td>Time (IST)</td><td>${getTimezoneTimestamp()}</td></tr>
+            <tr><td>Sensor</td><td>${impact.sensor}</td></tr>
+            <tr><td>Peak</td><td>${impact.peak_g.toFixed(3)} g</td></tr>
+            <tr><td>Class</td><td>${impact.p_class || '—'}</td></tr>
+            <tr><td>Distance</td><td>${(impact.distance_m/1000).toFixed(3)} km</td></tr>
+            <tr><td>GPS</td><td><a href="${mapsLink}">${mapsLink}</a></td></tr>
+            <tr><td>RMS V/L</td><td>${impact.rmsV?.toFixed(3)} / ${impact.rmsL?.toFixed(3)}</td></tr>
+            <tr><td>SD V/L</td><td>${impact.sdV?.toFixed(3)} / ${impact.sdL?.toFixed(3)}</td></tr>
+            <tr><td>Axes (X/Y/Z)</td><td>${impact.x?.toFixed(3)} / ${impact.y?.toFixed(3)} / ${impact.z?.toFixed(3)}</td></tr>
+        </table>`;
+
+    try {
+        await transporter.sendMail({
+            from: process.env.SMTP_FROM,
+            to: notifyConfig.emails.join(','),
+            subject: `[IMPACT] ${impact.severity} Alert (${impact.p_class}) on ${impact.sensor}`,
+            html,
+        });
+        console.log(`[email] Alert sent for ${impact.sensor} ${impact.peak_g}g`);
+    } catch (e) {
+        console.error('[email] Send failed:', e.message);
+    }
+}
+
+// ── Express app ──────────────────────────────────────────────────────────
 const app    = express();
 const server = http.createServer(app);
 const io     = socketIo(server, { cors: { origin: '*', methods: ['GET', 'POST'] } });
@@ -370,7 +484,7 @@ app.use(express.static(path.join(__dirname, '../client')));
 // ── PostgreSQL schema init ────────────────────────────────────────────────
 // NOTE: sensor/device_id columns are TEXT — no schema change needed to add
 // new sensors. Just add them to SENSORS[] above.
-let pgReady = false;
+let pgReady = false; 
 
 async function initDB() {
     try {
@@ -683,6 +797,37 @@ app.delete('/api/axis-limits', (req, res) => {
     console.log('[axis-limits] Reset to default (0.5g):', axisLimitsConfig);
     io.emit('axis-limits-updated', axisLimitsConfig);
     res.json({ success: true, axisLimits: axisLimitsConfig });
+});
+
+// ── Notification endpoints ──────────────────────────────────────────────────
+app.get('/api/notify-emails', async (req, res) => {
+    try {
+        const cfg = await loadNotifyEmails();
+        res.json(cfg);
+    } catch (e) {
+        console.error('/api/notify-emails error:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+app.post('/api/notify-emails', async (req, res) => {
+    const { emails, minSeverity, cooldownSec, enabled } = req.body;
+    const newCfg = {
+        emails: emails || [],
+        minSeverity: ['LOW', 'MEDIUM', 'HIGH'].includes(minSeverity) ? minSeverity : 'MEDIUM',
+        cooldownSec: (typeof cooldownSec === 'number' && cooldownSec >= 0) ? cooldownSec : 60,
+        enabled: enabled !== undefined ? enabled : true,
+    };
+    try {
+        await saveNotifyEmails(newCfg);
+        notifyConfig = newCfg; // update in-memory
+        console.log('[notify] Config updated:', JSON.stringify(newCfg));
+        io.emit('notify-config-changed', newCfg);
+        res.json({ success: true, notifyConfig: newCfg });
+    } catch (e) {
+        console.error('/api/notify-emails POST error:', e.message);
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // ── Last health status ───────────────────────────────────────────────────
@@ -1578,6 +1723,8 @@ async function handleBinarySensorPacket(sensorMeta, message, timestamp) {
             ).catch(e => console.error('events insert:', e.message));
         }
         io.emit('new-impact', impact);
+        // ── Email alert trigger ──────────────────────────────────────────────
+        maybeSendImpactEmail(impact);
         computeStats(24).then(stats => io.emit('stats-update', stats)).catch(() => {});
     }
 
@@ -1746,6 +1893,8 @@ mqttClient.on('message', async (topic, message) => {
             }
 
             io.emit('new-impact', impact);
+            // ── Email alert trigger ──────────────────────────────────────────────
+            maybeSendImpactEmail(impact);
             console.log(`IMPACT: ${peakVal.toFixed(3)}g (${severity}) on ${sensorSide}`);
             computeStats(24).then(stats => {
                 io.emit('stats-update', stats);
@@ -1981,6 +2130,8 @@ async function processRawAccelReading(sensorMeta, stats, timestamp) {
             ).catch(e => console.error('events insert:', e.message));
         }
         io.emit('new-impact', impact);
+        // ── Email alert trigger ──────────────────────────────────────────────
+        maybeSendImpactEmail(impact);
         console.log(`IMPACT: ${peakVal.toFixed(3)}g (${severity}) on ${sensorId}`);
         computeStats(24).then(s => io.emit('stats-update', s)).catch(() => {});
     }
@@ -2138,7 +2289,7 @@ app.get('/api/test-report/csv', async (req, res) => {
         const durStr  = `${Math.floor(durSec/60)}m ${durSec%60}s`;
 
         const lines = [];
-        lines.push(`# UABAMS TEST RUN REPORT`);
+        lines.push(`# TEST RUN REPORT`);
         lines.push(`# Date,${fromDt.toLocaleDateString('en-IN')}`);
         lines.push(`# Start Time,${fromDt.toLocaleTimeString('en-IN')}`);
         lines.push(`# End Time,${toDt.toLocaleTimeString('en-IN')}`);

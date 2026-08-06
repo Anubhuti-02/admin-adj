@@ -88,6 +88,7 @@ function setAccelStatus(accelId, status) {
 function updateNorthernPanel() {
     const L = sensorCache.left;
     const R = sensorCache.right;
+    const P = sensorCache.pivot;
 
     const ablVert = document.getElementById('ablVert');
     const ablLat  = document.getElementById('ablLat');
@@ -102,7 +103,6 @@ function updateNorthernPanel() {
     if (abrLat  && R.lat !== null) abrLat.textContent  = R.lat.toFixed(4) + ' g';
     if (pivotX  && P.x !== null)   pivotX.textContent  = P.x.toFixed(4) + ' g';
     if (pivotY  && P.y !== null)   pivotY.textContent  = P.y.toFixed(4) + ' g';
-
 
     // Increment counter on each packet
     const counter = document.getElementById('counter');
@@ -149,6 +149,96 @@ function _notifRender() {
         : '<p class="notif-empty">No alerts yet</p>';
 }
 
+// ── Email notification settings ──────────────────────────────────────────
+let emailConfig = { emails: [], minSeverity: 'MEDIUM', cooldownSec: 60 };
+
+async function loadEmailConfig() {
+    try {
+        const res = await fetch('/api/notify-emails');
+        if (res.ok) {
+            const data = await res.json();
+            emailConfig = data;
+            // Populate form fields
+            const emailsInput = document.getElementById('notifEmailsInput');
+            const severitySelect = document.getElementById('notifMinSeverity');
+            const cooldownInput = document.getElementById('notifCooldown');
+            if (emailsInput) emailsInput.value = (data.emails || []).join(', ');
+            if (severitySelect) severitySelect.value = data.minSeverity || 'MEDIUM';
+            if (cooldownInput) cooldownInput.value = data.cooldownSec ?? 60;
+        } else {
+            console.warn('[notify] Failed to load email config');
+        }
+    } catch (e) {
+        console.error('[notify] loadEmailConfig error:', e.message);
+    }
+}
+
+async function saveEmailConfig() {
+    const emailsInput = document.getElementById('notifEmailsInput');
+    const severitySelect = document.getElementById('notifMinSeverity');
+    const cooldownInput = document.getElementById('notifCooldown');
+    const statusEl = document.getElementById('notifSettingsStatus');
+
+    const emails = emailsInput.value.split(',').map(s => s.trim()).filter(Boolean);
+    const minSeverity = severitySelect.value;
+    const cooldownSec = parseInt(cooldownInput.value, 10) || 0;
+
+    try {
+        const res = await fetch('/api/notify-emails', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ emails, minSeverity, cooldownSec })
+        });
+        if (res.ok) {
+            const data = await res.json();
+            emailConfig = data.notifyConfig;
+            statusEl.textContent = '✅ Settings saved!';
+            statusEl.style.color = '#22c55e';
+            setTimeout(() => { statusEl.textContent = ''; }, 3000);
+        } else {
+            const err = await res.json();
+            statusEl.textContent = '❌ Error: ' + (err.error || 'unknown');
+            statusEl.style.color = '#ef4444';
+        }
+    } catch (e) {
+        statusEl.textContent = '❌ Network error';
+        statusEl.style.color = '#ef4444';
+        console.error('[notify] saveEmailConfig error:', e.message);
+    }
+}
+
+// ── Notification dropdown tabs ───────────────────────────────────────────
+function initNotifTabs() {
+    const tabs = document.querySelectorAll('.notif-tab');
+    const alertsTab = document.getElementById('notifAlertsTab');
+    const settingsTab = document.getElementById('notifSettingsTab');
+    if (!tabs.length) return;
+
+    tabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+            tabs.forEach(t => t.classList.remove('active'));
+            tab.classList.add('active');
+            const target = tab.dataset.tab;
+            if (target === 'alerts') {
+                alertsTab.style.display = 'block';
+                settingsTab.style.display = 'none';
+            } else {
+                alertsTab.style.display = 'none';
+                settingsTab.style.display = 'block';
+                // Load fresh config when switching to settings
+                loadEmailConfig();
+            }
+        });
+    });
+}
+
+function initEmailSaveButton() {
+    const saveBtn = document.getElementById('notifSaveSettings');
+    if (saveBtn) {
+        saveBtn.addEventListener('click', saveEmailConfig);
+    }
+}
+
 (function initNotifBell() {
     const btn      = document.getElementById('notifBellBtn');
     const dropdown = document.getElementById('notifDropdown');
@@ -159,11 +249,16 @@ function _notifRender() {
         e.stopPropagation();
         _notifBellOpen = !_notifBellOpen;
         dropdown.style.display = _notifBellOpen ? 'block' : 'none';
+        if (_notifBellOpen) loadEmailConfig();
     });
 
-    document.addEventListener('click', () => {
-        _notifBellOpen = false;
-        if (dropdown) dropdown.style.display = 'none';
+    // Fixed: close only if click is outside the bell button AND outside the dropdown
+    document.addEventListener('click', (e) => {
+        const wrap = document.getElementById('notifWrap');
+        if (wrap && !wrap.contains(e.target) && dropdown && !dropdown.contains(e.target)) {
+            _notifBellOpen = false;
+            dropdown.style.display = 'none';
+        }
     });
 
     if (clearBtn) {
@@ -173,6 +268,9 @@ function _notifRender() {
             _notifRender();
         });
     }
+
+    initNotifTabs();
+    initEmailSaveButton();
 })();
 
 function _notifAddHighAlert(impact) {
@@ -288,12 +386,12 @@ function connectToBackend() {
         updateHeaderStatus();
 
         if (side === 'pivot') {
-        sensorCache.pivot.x = data.x ?? 0;
-        sensorCache.pivot.y = data.y ?? 0;
-        updateNorthernPanel();
-        return;
+            sensorCache.pivot.x = data.x ?? 0;
+            sensorCache.pivot.y = data.y ?? 0;
+            updateNorthernPanel();
+            return;
         }
-        
+
         const x    = data.x ?? 0;
         const y    = data.y ?? 0;
         const z    = data.z ?? 0;
@@ -419,6 +517,9 @@ window.addEventListener('load', () => {
     const lastPage = localStorage.getItem('last_page');
     if (lastPage) loadPage(lastPage);
 
+    // Load email config on startup
+    loadEmailConfig();
+
     // Socket.IO is loaded from CDN in the HTML <head>; connect immediately
     connectToBackend();
 
@@ -431,7 +532,7 @@ window.addEventListener('load', () => {
     document.getElementById('applyRange').addEventListener('click', applyHistoryRange);
     document.getElementById('goLive').addEventListener('click', goLive);
 
-    // Close dropdown when clicking outside
+    // Close history dropdown when clicking outside
     document.addEventListener('click', e => {
         const wrap = document.getElementById('historyControl');
         if (wrap && !wrap.contains(e.target)) {

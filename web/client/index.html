@@ -95,11 +95,44 @@
                     <span class="notif-badge" id="notifBadge" style="display:none;">0</span>
                 </button>
                 <div class="notif-dropdown" id="notifDropdown" style="display:none;">
-                    <div class="notif-header">
-                        <span>Recent HIGH Alerts</span>
-                        <button class="notif-clear" id="notifClear">Clear</button>
+                    <!-- Tabs -->
+                    <div class="notif-tabs">
+                        <button class="notif-tab active" data-tab="alerts">Alerts</button>
+                        <button class="notif-tab" data-tab="settings">Email Settings</button>
                     </div>
-                    <div id="notifList"><p class="notif-empty">No alerts yet</p></div>
+                    <!-- Alerts tab -->
+                    <div id="notifAlertsTab">
+                        <div class="notif-header">
+                            <span>Recent HIGH Alerts</span>
+                            <button class="notif-clear" id="notifClear">Clear</button>
+                        </div>
+                        <div id="notifList"><p class="notif-empty">No alerts yet</p></div>
+                    </div>
+                    <!-- Settings tab -->
+                    <div id="notifSettingsTab" style="display:none;">
+                        <div class="notif-settings-form">
+                            <div class="notif-form-row">
+                                <label>Email addresses (comma separated)</label>
+                                <input type="text" id="notifEmailsInput" placeholder="user1@example.com, user2@example.com">
+                            </div>
+                            <div class="notif-form-row">
+                                <label>Minimum severity</label>
+                                <select id="notifMinSeverity">
+                                    <option value="LOW">LOW</option>
+                                    <option value="MEDIUM" selected>MEDIUM</option>
+                                    <option value="HIGH">HIGH</option>
+                                </select>
+                            </div>
+                            <div class="notif-form-row">
+                                <label>Cooldown (seconds per sensor)</label>
+                                <input type="number" id="notifCooldown" value="60" min="0" step="1">
+                            </div>
+                            <div class="notif-form-actions">
+                                <button id="notifSaveSettings" class="notif-save-btn">Save Settings</button>
+                                <span id="notifSettingsStatus" class="notif-status-msg"></span>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -163,8 +196,7 @@
                         <span class="reading-label">P-LAT</span>
                         <span class="reading-value" id="pivotX">— g</span>
                     </div>
-
-                   </div>
+                </div>
             </div>
             <div class="info-section">
                 <h3><i class="fas fa-map-marker-alt"></i> GPS Position</h3>

@@ -193,13 +193,37 @@ body {
     position: absolute;
     top: calc(100% + 8px);
     right: 0;
-    width: 300px;
+    width: 320px;
     background: #fff;
     border: 1px solid #e2e8f0;
     border-radius: 0.75rem;
     box-shadow: 0 10px 30px rgba(0,0,0,0.15);
     z-index: 9999;
     overflow: hidden;
+}
+
+/* Notification tabs */
+.notif-tabs {
+    display: flex;
+    border-bottom: 1px solid #e2e8f0;
+    background: #f8fafc;
+}
+.notif-tab {
+    flex: 1;
+    padding: 0.6rem 1rem;
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    font-weight: 600;
+    font-size: 0.8rem;
+    color: #64748b;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+.notif-tab:hover { background: #f1f5f9; }
+.notif-tab.active {
+    color: #0f172a;
+    border-bottom-color: #22c55e;
 }
 
 .notif-header {
@@ -223,6 +247,50 @@ body {
     border-radius: 4px;
 }
 .notif-clear:hover { background: #f1f5f9; }
+
+/* Settings form */
+.notif-settings-form {
+    padding: 1rem;
+}
+.notif-form-row {
+    margin-bottom: 0.8rem;
+}
+.notif-form-row label {
+    display: block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #475569;
+    margin-bottom: 0.2rem;
+}
+.notif-form-row input,
+.notif-form-row select {
+    width: 100%;
+    padding: 0.4rem 0.6rem;
+    border: 1px solid #d1d5db;
+    border-radius: 0.375rem;
+    font-size: 0.85rem;
+}
+.notif-form-actions {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-top: 0.5rem;
+}
+.notif-save-btn {
+    background: #22c55e;
+    border: none;
+    color: white;
+    padding: 0.4rem 1.2rem;
+    border-radius: 0.375rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+.notif-save-btn:hover { background: #16a34a; }
+.notif-status-msg {
+    font-size: 0.8rem;
+    font-weight: 500;
+}
 
 .notif-item {
     padding: 0.6rem 1rem;
@@ -371,7 +439,6 @@ body {
 }
 
 .reading-value { display: block; color: #1e293b; font-size: 16px; font-weight: 700; }
-
 
 .alerts-mini-list { display: flex; flex-direction: column; gap: 8px; }
 

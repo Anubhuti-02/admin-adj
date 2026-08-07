@@ -12,6 +12,12 @@ const HISTORY_FROM = _urlParams.get('from');
 const HISTORY_TO   = _urlParams.get('to');
 const IS_HISTORY   = !!(HISTORY_FROM && HISTORY_TO);
 
+// 'all' | 'peak' (crossed a P1/P2/P3 priority threshold) | 'raw' (crossed a raw X/Y axis limit)
+// Set via ?view=peak / ?view=raw when this page is opened from the Peak Events /
+// Raw Events menu entries; falls back to 'all' for the plain Events link.
+const VIEW_PARAM = _urlParams.get('view');
+let viewModeVal   = (VIEW_PARAM === 'peak' || VIEW_PARAM === 'raw') ? VIEW_PARAM : 'all';
+
 let thresholds = { p1Min: null, p1Max: null, p2Min: null, p2Max: null, p3Min: null };
 
 // ── Axis limits (server-backed via /api/axis-limits) — single g-value per axis,
@@ -142,9 +148,19 @@ async function fetchEvents() {
 
         const dateInput = document.getElementById('filterDate');
         if (dateInput && dateInput.value) {
-            const d = new Date(dateInput.value);
-            const start = new Date(d); start.setHours(0, 0, 0, 0);
-            const end   = new Date(d); end.setHours(23, 59, 59, 999);
+            const [y, m, d] = dateInput.value.split('-').map(Number);
+            const start = new Date(y, m - 1, d); start.setHours(0, 0, 0, 0);
+            const end   = new Date(y, m - 1, d); end.setHours(23, 59, 59, 999);
+            url.searchParams.set('from', start.toISOString());
+            url.searchParams.set('to',   end.toISOString());
+        }
+        else if (!HISTORY_FROM && (viewModeVal === 'peak' || viewModeVal === 'raw')) {
+            // Peak/Raw views need to search FAR beyond the noisy "last 2000
+            // rows" window, since low-magnitude readings can flood that
+            // window and bury the real classified events further back.
+            // Pull the last 30 days by default when no explicit date is set.
+            const end   = new Date();
+            const start = new Date(end.getTime() - 30 * 24 * 3600000);
             url.searchParams.set('from', start.toISOString());
             url.searchParams.set('to',   end.toISOString());
         }
@@ -176,6 +192,8 @@ async function fetchEvents() {
 function filtered() {
     let list = filterVal === 'all' ? allEvents : allEvents.filter(e => e.severity === filterVal);
     if (sensorFilterVal !== 'all') list = list.filter(e => e.sensor === sensorFilterVal);
+    if (viewModeVal === 'peak') list = list.filter(e => !!e.pClass);
+    if (viewModeVal === 'raw')  list = list.filter(e => e.latLimit != null || e.vertLimit != null);
     return list;
 }
 
@@ -249,13 +267,19 @@ function goToMapEvent(idx) {
 window.goToMapEvent = goToMapEvent;
 
 function renderAll(flashDot = false) {
+    document.getElementById('totalEvents').textContent  = allEvents.length;
+    document.getElementById('highEvents').textContent   = allEvents.filter(e => e.severity === 'high').length;
+    document.getElementById('mediumEvents').textContent = allEvents.filter(e => e.severity === 'medium').length;
+    document.getElementById('lowEvents').textContent    = allEvents.filter(e => e.severity === 'low').length;
+
     const list = filtered();
-    document.getElementById('totalEvents').textContent  = list.length;
-    document.getElementById('highEvents').textContent   = list.filter(e => e.severity === 'high').length;
-    document.getElementById('mediumEvents').textContent = list.filter(e => e.severity === 'medium').length;
-    document.getElementById('lowEvents').textContent    = list.filter(e => e.severity === 'low').length;
+    const emptyMsg = viewModeVal === 'peak'
+        ? 'No events have crossed a Priority (P1/P2/P3) peak threshold. Check Configuration → Priority Thresholds.'
+        : viewModeVal === 'raw'
+            ? 'No events have crossed a configured raw Axis Limit. Check Configuration → Axis Limit Values.'
+            : 'No events found.';
     document.getElementById('eventsList').innerHTML =
-        list.length ? list.map((ev, i) => cardHTML(ev, i)).join('') : '<p class="empty">No events found.</p>';
+        list.length ? list.map((ev, i) => cardHTML(ev, i)).join('') : `<p class="empty">${emptyMsg}</p>`;
 
     if (flashDot) {
         const dot = document.getElementById('liveDot');
@@ -284,9 +308,9 @@ function exportEvents() {
     const url = new URL(`${API}/api/impacts/export/csv`);
 
     if (dateInput && dateInput.value) {
-        const d     = new Date(dateInput.value);
-        const start = new Date(d); start.setHours(0, 0, 0, 0);
-        const end   = new Date(d); end.setHours(23, 59, 59, 999);
+        const [y, m, d] = dateInput.value.split('-').map(Number);
+        const start = new Date(y, m - 1, d); start.setHours(0, 0, 0, 0);
+        const end   = new Date(y, m - 1, d); end.setHours(23, 59, 59, 999);
         url.searchParams.set('from', start.toISOString());
         url.searchParams.set('to',   end.toISOString());
     } else if (HISTORY_FROM && HISTORY_TO) {
@@ -316,6 +340,14 @@ if (!IS_HISTORY && typeof io !== 'undefined') {
         renderAll();
     });
 }
+
+(function initViewHeading() {
+    const h1 = document.querySelector('.header-left h1');
+    if (h1) {
+        if (viewModeVal === 'peak') h1.textContent = 'Peak Events';
+        else if (viewModeVal === 'raw') h1.textContent = 'Raw Events';
+    }
+})();
 
 (function init() {
     const statusEl = document.getElementById('connStatus');

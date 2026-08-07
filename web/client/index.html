@@ -111,22 +111,37 @@
                     <!-- Settings tab -->
                     <div id="notifSettingsTab" style="display:none;">
                         <div class="notif-settings-form">
+                            <!-- Email list manager -->
                             <div class="notif-form-row">
-                                <label>Email addresses (comma separated)</label>
-                                <input type="text" id="notifEmailsInput" placeholder="user1@example.com, user2@example.com">
+                                <label>Recipient emails</label>
+                                <div class="notif-email-list" id="notifEmailList">
+                                    <!-- tags rendered by JS -->
+                                </div>
+                                <div class="notif-email-add">
+                                    <input type="email" id="notifEmailInput" list="emailHistory" placeholder="Enter email address">
+                                    <datalist id="emailHistory"></datalist>
+                                    <button id="notifEmailAddBtn" class="notif-add-btn">Add</button>
+                                </div>
+                                <div style="font-size:0.7rem;color:#94a3b8;margin-top:0.3rem;">
+                                    <i class="fas fa-info-circle"></i> Type to see previously used emails
+                                </div>
                             </div>
+                                <div id="notifEmailHistoryList" class="notif-email-history-list"></div>
+                        
+                            <!-- Severity -->
                             <div class="notif-form-row">
                                 <label>Minimum severity</label>
                                 <select id="notifMinSeverity">
+                                    <option value="ALL">ALL</option>
                                     <option value="LOW">LOW</option>
                                     <option value="MEDIUM" selected>MEDIUM</option>
                                     <option value="HIGH">HIGH</option>
                                 </select>
                             </div>
-                            <div class="notif-form-row">
-                                <label>Cooldown (seconds per sensor)</label>
-                                <input type="number" id="notifCooldown" value="60" min="0" step="1">
-                            </div>
+                        
+                           
+                        
+                            <!-- Save button -->
                             <div class="notif-form-actions">
                                 <button id="notifSaveSettings" class="notif-save-btn">Save Settings</button>
                                 <span id="notifSettingsStatus" class="notif-status-msg"></span>
@@ -135,6 +150,7 @@
                     </div>
                 </div>
             </div>
+
 
             <div class="time-display" id="currentTime"></div>
             <div class="user-profile"><i class="fas fa-user-circle"></i></div>

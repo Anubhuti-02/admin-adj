@@ -149,8 +149,97 @@ function _notifRender() {
         : '<p class="notif-empty">No alerts yet</p>';
 }
 
+
 // ── Email notification settings ──────────────────────────────────────────
-let emailConfig = { emails: [], minSeverity: 'MEDIUM', cooldownSec: 60 };
+let emailConfig = { emails: [], minSeverity: 'MEDIUM', enabled: true };
+let emailHistory = JSON.parse(localStorage.getItem('notifEmailHistory') || '[]');
+
+function updateEmailHistory(emails) {
+    const all = [...emailHistory, ...emails];
+    emailHistory = [...new Set(all)].slice(0, 50);
+    localStorage.setItem('notifEmailHistory', JSON.stringify(emailHistory));
+
+    const datalist = document.getElementById('emailHistory');
+    if (datalist) datalist.innerHTML = emailHistory.map(e => `<option value="${e}">`).join('');
+
+    renderEmailHistoryList(); // keep checklist in sync whenever history changes
+}
+
+function renderEmailList(emails) {
+    const container = document.getElementById('notifEmailList');
+    if (!container) return;
+    container.innerHTML = emails.map(email =>
+        `<span class="notif-email-tag">
+            ${email}
+            <span class="remove" data-email="${email}">&times;</span>
+        </span>`
+    ).join('');
+
+    container.querySelectorAll('.remove').forEach(el => {
+        el.addEventListener('click', () => {
+            const email = el.dataset.email;
+            emailConfig.emails = (emailConfig.emails || []).filter(e => e !== email);
+            renderEmailList(emailConfig.emails);
+            renderEmailHistoryList();
+            saveEmailConfig();
+        });
+    });
+
+    renderEmailHistoryList(); // keep checkbox states in sync with active tags
+}
+
+function renderEmailHistoryList() {
+    const container = document.getElementById('notifEmailHistoryList');
+    if (!container) return; // fails silently if the div is missing from HTML — check Step 1!
+
+    if (!emailHistory.length) {
+        container.innerHTML = '<p style="font-size:0.72rem;color:#94a3b8;margin-top:0.4rem;">No previous emails yet</p>';
+        return;
+    }
+
+    const active = new Set(emailConfig.emails || []);
+
+    container.innerHTML = emailHistory.map(email => `
+        <div class="notif-email-history-item">
+            <label>
+                <input type="checkbox" data-email="${email}" ${active.has(email) ? 'checked' : ''}>
+                <span>${email}</span>
+            </label>
+            <button type="button" class="notif-email-history-delete" data-email="${email}" title="Remove permanently">
+                <i class="fas fa-trash-alt"></i>
+            </button>
+        </div>
+    `).join('');
+
+    container.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+        cb.addEventListener('change', () => {
+            const email = cb.dataset.email;
+            const current = emailConfig.emails || [];
+            if (cb.checked) {
+                if (!current.includes(email)) current.push(email);
+            } else {
+                emailConfig.emails = current.filter(e => e !== email);
+            }
+            renderEmailList(emailConfig.emails);
+            saveEmailConfig();
+        });
+    });
+
+    container.querySelectorAll('.notif-email-history-delete').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const email = btn.dataset.email;
+            if (!confirm(`Remove "${email}" from saved history? This can't be undone.`)) return;
+            emailHistory = emailHistory.filter(e => e !== email);
+            localStorage.setItem('notifEmailHistory', JSON.stringify(emailHistory));
+            const datalist = document.getElementById('emailHistory');
+            if (datalist) datalist.innerHTML = emailHistory.map(e => `<option value="${e}">`).join('');
+            emailConfig.emails = (emailConfig.emails || []).filter(e => e !== email);
+            renderEmailList(emailConfig.emails);
+            renderEmailHistoryList();
+            saveEmailConfig();
+        });
+    });
+}
 
 async function loadEmailConfig() {
     try {
@@ -158,13 +247,12 @@ async function loadEmailConfig() {
         if (res.ok) {
             const data = await res.json();
             emailConfig = data;
-            // Populate form fields
-            const emailsInput = document.getElementById('notifEmailsInput');
             const severitySelect = document.getElementById('notifMinSeverity');
-            const cooldownInput = document.getElementById('notifCooldown');
-            if (emailsInput) emailsInput.value = (data.emails || []).join(', ');
+            
             if (severitySelect) severitySelect.value = data.minSeverity || 'MEDIUM';
-            if (cooldownInput) cooldownInput.value = data.cooldownSec ?? 60;
+           ;
+            renderEmailList(data.emails || []);
+            updateEmailHistory(data.emails || []);
         } else {
             console.warn('[notify] Failed to load email config');
         }
@@ -174,40 +262,82 @@ async function loadEmailConfig() {
 }
 
 async function saveEmailConfig() {
-    const emailsInput = document.getElementById('notifEmailsInput');
     const severitySelect = document.getElementById('notifMinSeverity');
-    const cooldownInput = document.getElementById('notifCooldown');
+   
     const statusEl = document.getElementById('notifSettingsStatus');
 
-    const emails = emailsInput.value.split(',').map(s => s.trim()).filter(Boolean);
     const minSeverity = severitySelect.value;
-    const cooldownSec = parseInt(cooldownInput.value, 10) || 0;
-
+   
     try {
         const res = await fetch('/api/notify-emails', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ emails, minSeverity, cooldownSec })
+            body: JSON.stringify({
+                emails: emailConfig.emails,
+                minSeverity,
+                enabled: true
+            })
         });
         if (res.ok) {
             const data = await res.json();
             emailConfig = data.notifyConfig;
-            statusEl.textContent = '✅ Settings saved!';
-            statusEl.style.color = '#22c55e';
-            setTimeout(() => { statusEl.textContent = ''; }, 3000);
+            renderEmailList(emailConfig.emails || []);   // re-sync after server round-trip
+            if (statusEl) {
+                statusEl.textContent = '✅ Settings saved!';
+                statusEl.style.color = '#22c55e';
+                setTimeout(() => { statusEl.textContent = ''; }, 3000);
+            }
         } else {
             const err = await res.json();
-            statusEl.textContent = '❌ Error: ' + (err.error || 'unknown');
-            statusEl.style.color = '#ef4444';
+            if (statusEl) { statusEl.textContent = '❌ Error: ' + (err.error || 'unknown'); statusEl.style.color = '#ef4444'; }
         }
     } catch (e) {
-        statusEl.textContent = '❌ Network error';
-        statusEl.style.color = '#ef4444';
+        if (statusEl) { statusEl.textContent = '❌ Network error'; statusEl.style.color = '#ef4444'; }
         console.error('[notify] saveEmailConfig error:', e.message);
     }
 }
 
-// ── Notification dropdown tabs ───────────────────────────────────────────
+function initEmailAddButton() {
+    const addBtn = document.getElementById('notifEmailAddBtn');
+    const input = document.getElementById('notifEmailInput');
+    if (!addBtn || !input) return;
+
+    const addEmail = () => {
+        const email = input.value.trim();
+        if (!email) return;
+        if (!email.includes('@') || !email.includes('.')) {
+            alert('Please enter a valid email address.');
+            return;
+        }
+        const current = emailConfig.emails || [];
+        if (current.includes(email)) {
+            alert('Email already added.');
+            input.value = '';
+            input.blur();
+            input.focus();
+            return;
+        }
+        current.push(email);
+        emailConfig.emails = current;
+
+        // Immediate UI update — tags + checklist — before the save round-trip
+        renderEmailList(current);
+        updateEmailHistory(current);
+
+        input.value = '';
+        input.blur();     // force-close any browser autofill dropdown
+        input.focus();    // then refocus so the user can type the next email right away
+
+        saveEmailConfig();
+    };
+
+    addBtn.addEventListener('click', addEmail);
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); addEmail(); }
+    });
+}
+
+// ── Integrate with existing init ─────────────────────────────────────────
 function initNotifTabs() {
     const tabs = document.querySelectorAll('.notif-tab');
     const alertsTab = document.getElementById('notifAlertsTab');
@@ -225,8 +355,7 @@ function initNotifTabs() {
             } else {
                 alertsTab.style.display = 'none';
                 settingsTab.style.display = 'block';
-                // Load fresh config when switching to settings
-                loadEmailConfig();
+                loadEmailConfig(); // refresh when switching
             }
         });
     });
@@ -238,6 +367,10 @@ function initEmailSaveButton() {
         saveBtn.addEventListener('click', saveEmailConfig);
     }
 }
+
+// Call these inside the existing initNotifBell or after DOM ready
+// Also call loadEmailConfig() on startup (already in window load)
+
 
 (function initNotifBell() {
     const btn      = document.getElementById('notifBellBtn');
@@ -271,6 +404,7 @@ function initEmailSaveButton() {
 
     initNotifTabs();
     initEmailSaveButton();
+    initEmailAddButton();
 })();
 
 function _notifAddHighAlert(impact) {

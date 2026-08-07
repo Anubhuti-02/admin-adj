@@ -54,24 +54,15 @@ setInterval(updateTime, 1000);
 updateTime();
 
 // ── Dark Mode ─────────────────────────────────────────────────────────────
-(function initDarkMode() {
-    const btn  = document.getElementById('darkModeBtn');
-    const icon = document.getElementById('darkModeIcon');
+// DarkMode.init() (common.js) already applied the saved preference on
+// DOMContentLoaded; this just wires up the toggle button, which only
+// exists on this shell page.
+(function initDarkModeToggle() {
+    const btn = document.getElementById('darkModeBtn');
     if (!btn) return;
 
-    const apply = (dark) => {
-        document.body.classList.toggle('dark', dark);
-        if (icon) {
-            icon.className = dark ? 'fas fa-sun' : 'fas fa-moon';
-        }
-        localStorage.setItem('railmonitor-dark', dark ? '1' : '0');
-    };
-
-    // Restore saved preference
-    apply(localStorage.getItem('railmonitor-dark') === '1');
-
     btn.addEventListener('click', () => {
-        apply(!document.body.classList.contains('dark'));
+        DarkMode.set(!document.body.classList.contains('dark'));
     });
 })();
 
@@ -352,6 +343,14 @@ function loadPage(pageUrl) {
 
     iframe.src = pageUrl;
     localStorage.setItem('last_page', pageUrl);
+
+    // The iframe's own common.js will apply the saved preference on its
+    // DOMContentLoaded, but push it too in case that page's common.js is
+    // older/missing — harmless either way.
+    iframe.addEventListener('load', () => {
+        iframe.contentWindow.postMessage({ type: 'railmonitor-dark-mode', dark: DarkMode.isDark() }, window.location.origin);
+    }, { once: true });
+
     return false;
 }
 

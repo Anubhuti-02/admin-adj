@@ -407,6 +407,27 @@ iframe { width: 100%; height: 100%; border: none; display: block; }
 }
 
 .welcome-message i { color: #22c55e; margin-bottom: 20px; }
+
+/* ── Dark Mode ── */
+body.dark .northern-central-panel {
+    background: #0f172a !important;
+    border-color: #334155 !important;
+}
+body.dark .panel-header h2 { color: #e2e8f0 !important; }
+body.dark .info-section h3 { color: #94a3b8 !important; }
+body.dark .info-grid,
+body.dark .reading-item,
+body.dark .alert-mini-item {
+    background: #1e293b !important;
+}
+body.dark .info-row { border-bottom-color: #334155 !important; }
+body.dark .info-label,
+body.dark .reading-label { color: #94a3b8 !important; }
+body.dark .info-value,
+body.dark .reading-value,
+body.dark .alert-text { color: #e2e8f0 !important; }
+body.dark .dynamic-content-panel { background: #0f172a !important; }
+body.dark .welcome-message { color: #64748b !important; }
 .welcome-message h2 { color: #1e293b; margin-bottom: 10px; }
 
 /* ── Responsive ── */

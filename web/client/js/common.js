@@ -6,6 +6,50 @@
 const RM_THRESHOLDS_KEY  = 'railmonitor_thresholds';
 const RM_LIMITS_KEY      = 'railmonitor_peak_limits';
 const TEST_RUN_START_KEY = 'uabams_test_run_start';
+const DARK_MODE_KEY      = 'railmonitor-dark';
+
+// ── Dark Mode ───────────────────────────────────────────────────────────
+// Shared across the shell (index.html) and every page loaded into its
+// iframe — each is a separate document, so each needs this applied
+// independently. The shell's own toggle button lives in index.js (only
+// index.html has the button); this just applies/reads the saved
+// preference so every page's own CSS reacts consistently.
+const DarkMode = {
+    isDark() { return localStorage.getItem(DARK_MODE_KEY) === '1'; },
+
+    apply(dark) {
+        document.body.classList.toggle('dark', dark);
+        const icon = document.getElementById('darkModeIcon');
+        if (icon) icon.className = dark ? 'fas fa-sun' : 'fas fa-moon';
+    },
+
+    set(dark) {
+        localStorage.setItem(DARK_MODE_KEY, dark ? '1' : '0');
+        DarkMode.apply(dark);
+        // Tell the parent shell (if this page is inside its iframe) and/or
+        // the iframe (if this page is the shell) to stay in sync.
+        try {
+            if (window.parent && window.parent !== window) {
+                window.parent.postMessage({ type: 'railmonitor-dark-mode', dark }, window.location.origin);
+            }
+            const iframe = document.getElementById('dynamicContent')?.querySelector('iframe');
+            if (iframe) iframe.contentWindow.postMessage({ type: 'railmonitor-dark-mode', dark }, window.location.origin);
+        } catch (e) { /* cross-origin or no iframe yet — ignore */ }
+    },
+
+    init() {
+        DarkMode.apply(DarkMode.isDark());
+    }
+};
+
+document.addEventListener('DOMContentLoaded', () => DarkMode.init());
+
+// Receive the preference from the other side of the iframe boundary
+// (shell → iframe on toggle, or iframe page → shell if it ever changes it).
+window.addEventListener('message', (e) => {
+    if (e.origin !== window.location.origin) return;
+    if (e.data && e.data.type === 'railmonitor-dark-mode') DarkMode.apply(e.data.dark);
+});
 
 // ── Global Test Run state (persists across page navigation) ───────────────
 const TestRun = {

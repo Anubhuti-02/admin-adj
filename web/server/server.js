@@ -14,9 +14,8 @@ const multer        = require('multer');
 // ── Timezone configuration ─────────────────────────────────────────────────
 const TIMEZONE = "Asia/Kolkata";
 function getTimezoneTimestamp() {
-    return DateTime.now().setZone(TIMEZONE).toFormat("yyyy-MM-dd'T'HH:mm:ss.SSS");
+    return DateTime.now().setZone(TIMEZONE).toFormat("yyyy-MM-dd'T'HH:mm:ss.SSS");s
 }
-
 // ═════════════════════════════════════════════════════════════════════════
 // ── SENSOR REGISTRY — single source of truth for every accelerometer ──────
 // To add a new accelerometer in future: add one entry here, assign it an
@@ -131,7 +130,7 @@ function shouldEmit(sensorId) {
 const PEAKS_LOG_FILE     = path.join(__dirname, 'peaks_log.json');
 const LIMITS_CONFIG_FILE = path.join(__dirname, 'limits_config.json');
 const AXIS_LIMITS_FILE = path.join(__dirname, 'axis_limits.json');
-const DEFAULT_AXIS_LIMIT = 0.5; // single g-value floor per axis, same idea as p1Min for thresholds
+const DEFAULT_AXIS_LIMIT = 1; // single g-value floor per axis, same idea as p1Min for thresholds
 
 function defaultAxisLimitsShape() {
     return {
@@ -165,7 +164,7 @@ let axisLimitsConfig = loadAxisLimits();
 // ─────────────────────────────────────────────────────────────────────────
 // FIX: the impact-detection gate below used to be hardcoded at `peakVal > 2`
 // in three separate places. That meant any reading between a low configured
-// axis limit (e.g. 0.5g) and 2g never became an event row at all — it never
+// axis limit (e.g. 1g) and 2g never became an event row at all — it never
 // hit accelerometer_events / peaksLog / the 'new-impact' socket event — so
 // events.js had nothing to attach the axis-limit tag to. This threshold now
 // tracks the lowest currently-configured axis limit automatically, so
@@ -790,11 +789,11 @@ app.post('/api/axis-limits', (req, res) => {
 });
 
 // DELETE — clears any user-saved values and resets every axis back to the
-// 0.5g default (matches /api/thresholds's DELETE-resets-to-default behavior)
+// 1g default (matches /api/thresholds's DELETE-resets-to-default behavior)
 app.delete('/api/axis-limits', (req, res) => {
     axisLimitsConfig = defaultAxisLimitsShape();
     saveAxisLimitsToFile(axisLimitsConfig);
-    console.log('[axis-limits] Reset to default (0.5g):', axisLimitsConfig);
+    console.log('[axis-limits] Reset to default (1g):', axisLimitsConfig);
     io.emit('axis-limits-updated', axisLimitsConfig);
     res.json({ success: true, axisLimits: axisLimitsConfig });
 });
@@ -1059,6 +1058,7 @@ app.get('/api/impacts', async (req, res) => {
         }
 
         if (pgReady) {
+            const limit = (from || to || hours) ? 2000 : 2000;
             const r = await pool.query(`
                 SELECT * FROM accelerometer_events
                 ${where}

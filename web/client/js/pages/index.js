@@ -132,7 +132,7 @@ function _notifRender() {
     badge.style.display = _notifAlerts.length ? 'flex' : 'none';
 
     listEl.innerHTML = _notifAlerts.length
-        ? _notifAlerts.slice(0, 8).map(a => `
+        ? _notifAlerts.map(a => `
             <div class="notif-item">
                 <div class="notif-item-peak">${a.peak.toFixed(2)}g — ${a.sensor} (${a.pClass || '—'})</div>
                 <div class="notif-item-meta">${a.time}</div>
@@ -244,6 +244,7 @@ async function loadEmailConfig() {
            ;
             renderEmailList(data.emails || []);
             updateEmailHistory(data.emails || []);
+            loadInitialNotifAlerts(); // refresh the alert list based on the new threshold
         } else {
             console.warn('[notify] Failed to load email config');
         }
@@ -398,18 +399,31 @@ function initEmailSaveButton() {
     initEmailAddButton();
 })();
 
-function _notifAddHighAlert(impact) {
-    if ((impact.severity || '').toUpperCase() !== 'HIGH') return;
+function _severityRank(s) {
+    const map = { LOW: 1, MEDIUM: 2, HIGH: 3 };
+    return map[(s || '').toUpperCase()] || 0;
+}
+
+function _meetsEmailThreshold(impact) {
+    const minSev = emailConfig.minSeverity || 'MEDIUM';
+    if (minSev === 'ALL') return true;
+    return _severityRank(impact.severity) >= _severityRank(minSev);
+}
+
+function _notifAddAlert(impact) {
+        if (!_meetsEmailThreshold(impact)) return;
     _notifAlerts.unshift({
         peak:   impact.peak_g || impact.gForce || 0,
         sensor: impact.sensor || '—',
         pClass: impact.p_class || null,
+        severity: impact.severity || 'LOW',
         time:   new Date(impact.timestamp || Date.now()).toLocaleTimeString('en-IN', {
             timeZone: 'Asia/Kolkata', hour12: false
         })
     });
-    if (_notifAlerts.length > 50) _notifAlerts.pop();
+    if (_notifAlerts.length > 300) _notifAlerts.pop();
     _notifRender();
+
 }
 
 function addImpactAlert(impact) {
@@ -427,7 +441,7 @@ function addImpactAlert(impact) {
     container.insertBefore(el, container.firstChild);
     while (container.children.length > 5) container.removeChild(container.lastChild);
 
-    _notifAddHighAlert(impact);
+    _notifAddAlert(impact);
     if (impact.severity === 'HIGH') showHighSeverityPopup(impact);
 }
 
@@ -554,6 +568,31 @@ async function loadInitialAlerts() {
     }
 }
 
+async function loadInitialNotifAlerts() {
+    try {
+        const res  = await fetch(SERVER_URL + '/api/impacts?hours=8760'); // last year, effectively "all"
+        const data = await res.json();
+        _notifAlerts.length = 0;
+        data
+            .filter(_meetsEmailThreshold)
+            .slice(0, 300)   // raised from 50 — scroll handles the rest
+            .forEach(impact => {
+                _notifAlerts.push({
+                    peak:   impact.peak_g || impact.gForce || 0,
+                    sensor: impact.sensor || '—',
+                    pClass: impact.p_class || null,
+                    severity: impact.severity || 'LOW',
+                    time:   new Date(impact.timestamp || Date.now()).toLocaleTimeString('en-IN', {
+                        timeZone: 'Asia/Kolkata', hour12: false
+                    })
+                });
+            });
+        _notifRender();
+    } catch (e) {
+        console.warn('[notify] Could not load initial notif alerts:', e.message);
+    }
+}
+
 // ── iframe loader ─────────────────────────────────────────────────────────
 function loadPage(pageUrl) {
     const dynamicContent = document.getElementById('dynamicContent');
@@ -597,10 +636,9 @@ function applyHistoryRange() {
     const dateVal = document.getElementById('rangeDate').value;
     if (!dateVal) { alert('Please select a date.'); return; }
 
-    const start = new Date(dateVal);
-    start.setHours(0, 0, 0, 0);
-    const end = new Date(dateVal);
-    end.setHours(23, 59, 59, 999);
+    const [y, m, d] = dateVal.split('-').map(Number);
+    const start = new Date(y, m - 1, d, 0, 0, 0, 0);
+    const end   = new Date(y, m - 1, d, 23, 59, 59, 999);
 
     window.HISTORY_FROM = start.toISOString();
     window.HISTORY_TO   = end.toISOString();

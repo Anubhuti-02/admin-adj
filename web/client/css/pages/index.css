@@ -377,6 +377,11 @@ body {
 }
 .notif-email-history-delete:hover { color: #ef4444; }
 
+#notifList {
+    max-height: 360px;
+    overflow-y: auto;
+}
+
 .mqtt-status {
     display: flex; align-items: center; gap: 0.4rem;
     padding: 0.3rem 0.75rem;

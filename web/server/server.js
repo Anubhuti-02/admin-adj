@@ -270,14 +270,24 @@ let chainagePreview = loadChainagePreview();
 console.log('[chainage-preview] Loaded:', chainagePreview ? `${chainagePreview.rows.length} rows` : 'none');
 
 // ── Report archival — on-demand export archives + continuous raw log ──────
-// REPORTS_DIR defaults to the external Geonix drive (932GB, mounted at boot
-// by the OS's udisks2 automount) so the continuous raw/impact/km-wise logs
-// land directly on it rather than the server's local disk — set
-// REPORTS_DIR_OVERRIDE in .env to point elsewhere instead. Falls back to the
-// old local `reports/` folder if the external drive isn't mounted (e.g.
-// unplugged) so a missing drive degrades gracefully instead of crashing
-// startup or silently dropping every report write.
-const GEONIX_MOUNT_PATH = '/media/rajdeep/Geonix PowerShell S3 - PHDD/UABAMS_reports';
+// REPORTS_DIR defaults to the external Geonix drive (932GB) so the
+// continuous raw/impact/km-wise logs land directly on it rather than the
+// server's local disk — set REPORTS_DIR_OVERRIDE in .env to point elsewhere
+// instead. Falls back to the old local `reports/` folder if the external
+// drive isn't mounted (e.g. unplugged) so a missing drive degrades
+// gracefully instead of crashing startup or silently dropping every report
+// write.
+//
+// Mounted at /mnt/geonix via a static /etc/fstab entry (UUID-keyed,
+// `force,nofail` — `force` because this NTFS volume reliably comes up
+// "dirty" per ntfs3's own dirty-bit check even after a clean unmount/
+// ntfsfix, for reasons not fully pinned down; `nofail` so a missing/
+// unplugged drive doesn't block boot), not the desktop's udisks2 auto-mount
+// (whose "Geonix PowerShell S3 - PHDD" label path contains spaces and
+// proved unreliable to mount programmatically). Every machine that runs
+// this server needs the same one-time `/etc/fstab` line added locally —
+// see the project notes for the exact entry.
+const GEONIX_MOUNT_PATH = '/mnt/geonix/UABAMS_reports';
 function resolveReportsDir() {
     if (process.env.REPORTS_DIR_OVERRIDE) return process.env.REPORTS_DIR_OVERRIDE;
     try {

@@ -1,7 +1,7 @@
 /* acceleration-km.css — KM-wise recorded accelerations */
 
 body {
-    font-family: 'Segoe UI', Arial, sans-serif;
+    font-family: Tahoma, 'MS Sans Serif', Arial, sans-serif;
     background: #f0f2f5;
     margin: 0;
     color: #1e293b;
@@ -225,7 +225,7 @@ tr:hover td { background: #f8fafc; }
 .value-low    { color: #22c55e; }
 
 .sd-value { 
-    font-family: monospace; 
+    font-family: 'Courier New', monospace; 
     color: #0284c7; 
 }
 
@@ -273,7 +273,7 @@ tr:hover td { background: #f8fafc; }
 }
 
 .worst-peaks-table td {
-    font-family: 'Consolas', 'Courier New', monospace;
+    font-family: 'Courier New', monospace;
     white-space: nowrap;           /* ← NO WRAPPING */
     overflow: hidden;
     text-overflow: ellipsis;       /* shows ... if still too long */

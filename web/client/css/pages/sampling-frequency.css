@@ -1,6 +1,6 @@
 /* sampling-frequency.css — Dual ADXL345 Configuration
    Restyled to match configuration.css / route-settings.html's visual language:
-   purple gradient page background, white glass card, Inter font, green (#22c55e)
+   purple gradient page background, white glass card, Tahoma font, green (#22c55e)
    accents, rounded-pill buttons, soft shadows. Structure/IDs unchanged so
    sampling-frequency.js and accel-config.js keep working untouched. */
 
@@ -22,8 +22,8 @@
     --c-label:        #3f3a34;
     --c-text:         #45403a;
     --c-muted:        #8a8177;
-    --font-ui:        'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    --font-mono:      'Roboto Mono', monospace;
+    --font-ui:        Tahoma, 'MS Sans Serif', Arial, sans-serif;
+    --font-mono:      'Courier New', monospace;
 }
 
 body {

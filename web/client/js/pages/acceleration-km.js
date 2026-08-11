@@ -551,7 +551,7 @@ function exportCSV() {
 }
 
 // Helper function to generate the actual CSV
-function generateFullDayCSV(docsForDay, reportDate) {
+async function generateFullDayCSV(docsForDay, reportDate) {
     
     const RECORDS_PER_KM = getRecordsPerKm();
     if (docsForDay.length === 0) return;
@@ -649,10 +649,23 @@ function generateFullDayCSV(docsForDay, reportDate) {
     }).catch(e => console.warn('[km-wise] Server archive failed (download unaffected):', e));
 
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const filename = `KM_Report_${reportDate}.csv`;
+
+    // Prefer the remembered save folder (shared with the Events page's
+    // "Save Folder" picker, same ReportSaveTarget/IndexedDB handle) —
+    // falls back to the normal browser download if nothing's chosen yet.
+    let savedToFolder = false;
+    try {
+        savedToFolder = await ReportSaveTarget.saveBlob(blob, filename);
+    } catch (e) {
+        console.error('[km-wise] Direct save failed, falling back to browser download:', e);
+    }
+    if (savedToFolder) return;
+
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url;
-    link.download = `KM_Report_${reportDate}.csv`;
+    link.download = filename;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);

@@ -1,7 +1,7 @@
 /* index.css — Shell layout: top menu, left panel, iframe content area */
 
 body {
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    font-family: Tahoma, 'MS Sans Serif', Geneva, Verdana, sans-serif;
     background-color: #f5f7fa;
     color: #1e293b;
     height: 100vh;
@@ -138,7 +138,7 @@ body {
 .time-display {
     color: #94a3b8;
     font-size: 13px;
-    font-family: monospace;
+    font-family: 'Courier New', monospace;
 }
 
 .user-profile { color: #e2e8f0; font-size: 24px; cursor: pointer; }

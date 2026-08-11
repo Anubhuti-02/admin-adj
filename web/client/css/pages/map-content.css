@@ -1,7 +1,7 @@
 /* map-content.css */
 
 body {
-    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    font-family: Tahoma, 'MS Sans Serif', Geneva, Verdana, sans-serif;
     background: var(--bg, #f8fafc);
     color: var(--text, #1e293b);
     margin: 0;

@@ -1,6 +1,7 @@
 require('dotenv').config();
 const express   = require('express');
 const http      = require('http');
+const https     = require('https');
 const socketIo  = require('socket.io');
 const mqtt      = require('mqtt');
 const cors      = require('cors');
@@ -269,12 +270,29 @@ let chainagePreview = loadChainagePreview();
 console.log('[chainage-preview] Loaded:', chainagePreview ? `${chainagePreview.rows.length} rows` : 'none');
 
 // ── Report archival — on-demand export archives + continuous raw log ──────
-const REPORTS_DIR         = path.join(__dirname, 'reports');
+// REPORTS_DIR defaults to the external Geonix drive (932GB, mounted at boot
+// by the OS's udisks2 automount) so the continuous raw/impact/km-wise logs
+// land directly on it rather than the server's local disk — set
+// REPORTS_DIR_OVERRIDE in .env to point elsewhere instead. Falls back to the
+// old local `reports/` folder if the external drive isn't mounted (e.g.
+// unplugged) so a missing drive degrades gracefully instead of crashing
+// startup or silently dropping every report write.
+const GEONIX_MOUNT_PATH = '/media/rajdeep/Geonix PowerShell S3 - PHDD/UABAMS_reports';
+function resolveReportsDir() {
+    if (process.env.REPORTS_DIR_OVERRIDE) return process.env.REPORTS_DIR_OVERRIDE;
+    try {
+        if (fs.existsSync(path.dirname(GEONIX_MOUNT_PATH))) return GEONIX_MOUNT_PATH;
+    } catch (e) { /* fall through to local */ }
+    console.warn('[reports] Geonix drive not found at expected mount path — falling back to local reports/ folder.');
+    return path.join(__dirname, 'reports');
+}
+const REPORTS_DIR         = resolveReportsDir();
 const IMPACT_REPORTS_DIR  = path.join(REPORTS_DIR, 'impact_events');
 const TESTRUN_REPORTS_DIR = path.join(REPORTS_DIR, 'test_runs');
 const KMWISE_REPORTS_DIR  = path.join(REPORTS_DIR, 'km_wise');
 const RAW_LOG_DIR         = path.join(REPORTS_DIR, 'raw_log');
 
+console.log(`[reports] Writing continuous report logs to: ${REPORTS_DIR}`);
 [IMPACT_REPORTS_DIR, TESTRUN_REPORTS_DIR, KMWISE_REPORTS_DIR, RAW_LOG_DIR].forEach(d => {
     try { fs.mkdirSync(d, { recursive: true }); }
     catch (e) { console.error(`[reports] Could not create ${d}:`, e.message); }
@@ -1935,7 +1953,7 @@ const SYNC0 = 0xAA, SYNC1 = 0x55;
 const ACCEL_SENSOR_IPS = {
     '192.168.1.201': 'left',   // ACCEL-1
     '192.168.1.202': 'right',  // ACCEL-2
-    '192.168.1.204': 'pivot',  // ACCEL-3
+    '192.168.1.203': 'pivot',  // ACCEL-3
     '192.168.1.205': 'aux',    // ACCEL-4
 };
 const ACCEL_PKT_SIZE  = 16;
@@ -2231,6 +2249,42 @@ tcpMux.listen(PORT, () => {
     console.log(`PostgreSQL: ${process.env.PG_HOST || 'localhost'}:${process.env.PG_PORT || 5432}/${process.env.PG_DB || 'uabams'}`);
 });
 tcpMux.on('error', e => console.error(`[MUX] error: ${e.message}`));
+
+// ── Optional HTTPS listener — separate port, plain `app` only (no GPS/accel
+// binary multiplexing, unlike the HTTP port above). Added solely so the
+// browser dashboard can be served from a secure context: some browser APIs
+// (e.g. File System Access's showDirectoryPicker(), used by the "Save
+// Folder" export feature) are unavailable over plain HTTP on a LAN IP,
+// only over HTTPS or localhost. Self-signed — browsers show a one-time
+// warning to click through per machine. Entirely additive: the HTTP+binary
+// port above is untouched and still the primary/default way to reach the
+// server, including for the WPF app and any hardware ingest.
+const HTTPS_PORT = process.env.HTTPS_PORT || 5443;
+const httpsCertPath = path.join(__dirname, 'certs', 'cert.pem');
+const httpsKeyPath  = path.join(__dirname, 'certs', 'key.pem');
+if (fs.existsSync(httpsCertPath) && fs.existsSync(httpsKeyPath)) {
+    try {
+        const httpsServer = https.createServer({
+            cert: fs.readFileSync(httpsCertPath),
+            key:  fs.readFileSync(httpsKeyPath),
+        }, app);
+        // Socket.IO must be explicitly attached to this second server too —
+        // otherwise a page loaded over HTTPS gets static files/REST fine but
+        // its live socket.io connection fails, since `io` was only ever
+        // bound to the original HTTP `server` above. attach() shares the
+        // same io instance/state (rooms, event handlers, etc.), it does not
+        // create a second independent Socket.IO server.
+        io.attach(httpsServer, { cors: { origin: '*', methods: ['GET', 'POST'] } });
+        httpsServer.listen(HTTPS_PORT, () => {
+            console.log(`HTTPS also available: https://${LOCAL_IP}:${HTTPS_PORT}/index.html (self-signed — accept the browser warning once per machine)`);
+        });
+        httpsServer.on('error', e => console.error(`[HTTPS] error: ${e.message}`));
+    } catch (e) {
+        console.error('[HTTPS] Failed to start:', e.message);
+    }
+} else {
+    console.log('[HTTPS] certs/cert.pem or certs/key.pem not found — HTTPS listener not started (HTTP-only).');
+}
 
 // ── Reset endpoint ────────────────────────────────────────────────────────
 app.post('/api/reset', async (req, res) => {

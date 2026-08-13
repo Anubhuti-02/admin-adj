@@ -104,11 +104,27 @@ function updateNorthernPanel() {
 }
 
 // ── Recent alerts ─────────────────────────────────────────────────────────
+// Scoped to HIGH/MEDIUM severity only — previously showed every threshold-
+// crossing impact (already server-side gated by impactDetectionThreshold(),
+// but that includes routine LOW-severity readings), which read as constant
+// noise here. This panel is meant to surface only events worth an
+// operator's attention, matching the high-severity popup's own bar.
+function isAlertWorthy(impact) {
+    const sev = (impact.severity || '').toUpperCase();
+    return sev === 'HIGH' || sev === 'MEDIUM';
+}
+
 function updateRecentAlerts(impacts) {
     const container = document.querySelector('.alerts-mini-list');
     if (!container || !impacts || !impacts.length) return;
 
-    container.innerHTML = impacts.slice(0, 3).map(impact => {
+    const notable = impacts.filter(isAlertWorthy);
+    if (!notable.length) {
+        container.innerHTML = `<div class="alert-mini-item"><span class="alert-text">No recent high/medium alerts</span></div>`;
+        return;
+    }
+
+    container.innerHTML = notable.slice(0, 3).map(impact => {
         const cls  = (impact.severity || 'low').toLowerCase();
         const loc  = impact.peak_g ? impact.peak_g.toFixed(1) + 'g' : '?g';
         const dist = impact.sensor ? ' (' + impact.sensor + ')' : '';
@@ -427,8 +443,16 @@ function _notifAddAlert(impact) {
 }
 
 function addImpactAlert(impact) {
+    // Notification bell still logs every impact regardless of severity
+    // (_notifAddAlert below) — only this mini-list on the dashboard is
+    // scoped to HIGH/MEDIUM, see isAlertWorthy()'s comment.
+    if (!isAlertWorthy(impact)) {
+        _notifAddAlert(impact);
+        return;
+    }
+
     const container = document.querySelector('.alerts-mini-list');
-    if (!container) return;
+    if (!container) { _notifAddAlert(impact); return; }
 
     const cls  = (impact.severity || 'low').toLowerCase();
     const loc  = impact.peak_g ? impact.peak_g.toFixed(1) + 'g' : '?g';

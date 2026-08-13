@@ -16,14 +16,133 @@ const RECORDS_PER_KM = RECORDS_PER_BLOCK * BLOCKS_PER_KM;
 const BLOCK_LENGTH_M = 200;
 
 let chainagePreview = null; // { sourceFileName, uploadedAt, rows, kmLengths }
+let detectedRouteMeta = null; // { routeTapeNo, section, railway, divisionCode, line, kmFrom, kmTo }
+
+// ── Route-tape header parsing ──────────────────────────────────────────────
+// First line of an RDSO route tape .DAT file looks like:
+//   RT12563021 RAC-SPC NR/MB DN KM 0-80,
+// i.e. RT<number> <SECTION-CODE> <RAILWAY>/<DIVISION-CODE> <UP|DN> KM <from>-<to>
+// Parsed entirely client-side (FileReader), independent of the server's own
+// row/kmLengths parsing — this only feeds the Route Settings prefill.
+const ROUTE_TAPE_HEADER_RE =
+    /^RT(\d+)\s+([A-Za-z0-9-]+)\s+([A-Za-z]+)\s*\/\s*([A-Za-z]+)\s+(UP|DN)\s+KM\s+(\d+)\s*-\s*(\d+)/i;
+
+function parseRouteTapeHeader(text) {
+    if (!text) return null;
+    const firstLine = text.split(/\r?\n/, 1)[0] || '';
+    const m = firstLine.match(ROUTE_TAPE_HEADER_RE);
+    if (!m) return null;
+    const [, routeTapeNo, section, railway, divisionCode, line, kmFrom, kmTo] = m;
+    return {
+        routeTapeNo: 'RT' + routeTapeNo,
+        section:     section.toUpperCase(),
+        railway:     railway.toUpperCase(),
+        divisionCode: divisionCode.toUpperCase(),
+        line:        line.toUpperCase(),
+        kmFrom:      Number(kmFrom),
+        kmTo:        Number(kmTo),
+    };
+}
+
+function readFileAsText(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload  = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error || new Error('File read failed'));
+        reader.readAsText(file);
+    });
+}
+
+function renderRouteMetaCard(status) {
+    const card = document.getElementById('routeMetaCard');
+    const body = document.getElementById('routeMetaBody');
+    if (!card || !body) return;
+
+    if (!detectedRouteMeta) { card.style.display = 'none'; return; }
+    const m = detectedRouteMeta;
+    card.style.display = '';
+
+    const statusLine = status === 'applying'
+        ? `<div class="status-line">Applying to Route Settings…</div>`
+        : status === 'ok'
+            ? `<div class="status-line" style="color:#16a34a;"><i class="fas fa-check-circle"></i> Applied to Route Settings — Railway, Division Code, Section, and Line updated automatically.</div>`
+            : status && status.startsWith('error:')
+                ? `<div class="status-line" style="color:#dc2626;"><i class="fas fa-exclamation-triangle"></i> Auto-apply failed: ${status.slice(6)}. Values shown below were detected but not saved — check Route Settings manually.</div>`
+                : '';
+
+    body.innerHTML = `
+        <div class="upload-row" style="flex-wrap:wrap;gap:8px 14px;margin-bottom:10px;">
+            <span class="block-chip">Route Tape: <strong>${m.routeTapeNo}</strong></span>
+            <span class="block-chip">Section: <strong>${m.section}</strong></span>
+            <span class="block-chip">Railway: <strong>${m.railway}</strong></span>
+            <span class="block-chip">Division Code: <strong>${m.divisionCode}</strong></span>
+            <span class="block-chip">Line: <strong>${m.line}</strong></span>
+            <span class="block-chip">KM Range: <strong>${m.kmFrom}–${m.kmTo}</strong></span>
+        </div>
+        ${statusLine}
+        <div class="status-line" style="margin-top:6px;">
+            Origin/Destination station codes, Division name, Block, and Rail LH/RH
+            aren't present in the route tape header, so those fields are left as-is.
+        </div>
+    `;
+}
+
+// Auto-applies the header-detected metadata to Route Settings the moment a
+// route tape is uploaded — no manual step. Fetches current section-config
+// first so fields the header doesn't cover (division name, block, railLH/RH)
+// aren't wiped out.
+async function applyRouteMetaToSettings() {
+    if (!detectedRouteMeta) return;
+    renderRouteMetaCard('applying');
+
+    try {
+        const existing = await fetch(`${API}/api/section-config`).then(r => r.ok ? r.json() : {}).catch(() => ({}));
+
+        const sectionRes = await fetch(`${API}/api/section-config`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                railway:      detectedRouteMeta.railway,
+                divisionCode: detectedRouteMeta.divisionCode,
+                division:     existing.division || '',
+                section:      detectedRouteMeta.section,
+                line:         detectedRouteMeta.line,
+                block:        existing.block || '',
+                railLH:       existing.railLH || '',
+                railRH:       existing.railRH || '',
+            })
+        });
+        if (!sectionRes.ok) throw new Error(`HTTP ${sectionRes.status}`);
+
+        renderRouteMetaCard('ok');
+    } catch (e) {
+        renderRouteMetaCard('error:' + e.message);
+    }
+}
+window.applyRouteMetaToSettings = applyRouteMetaToSettings;
 
 // ── Upload ───────────────────────────────────────────────────────────────
 async function uploadChainageFile() {
     const input = document.getElementById('chainageFile');
     if (!input.files.length) { setUploadStatus('Please choose a file first.'); return; }
 
+    const file = input.files[0];
+
+    // Parse the route-tape header client-side, independent of the server
+    // round-trip below, so metadata detection works even if the server
+    // parse step changes shape.
+    try {
+        const text = await readFileAsText(file);
+        detectedRouteMeta = parseRouteTapeHeader(text);
+    } catch (e) {
+        console.warn('[chainage-preview] header read failed:', e.message);
+        detectedRouteMeta = null;
+    }
+    renderRouteMetaCard();
+    if (detectedRouteMeta) applyRouteMetaToSettings(); // fire-and-forget — no manual step
+
     const form = new FormData();
-    form.append('file', input.files[0]);
+    form.append('file', file);
 
     setUploadStatus('Uploading…');
     try {
@@ -45,8 +164,10 @@ async function clearChainageFile() {
         await fetch(`${API}/api/chainage-preview`, { method: 'DELETE' });
     } catch (_) {}
     chainagePreview = null;
+    detectedRouteMeta = null;
     document.getElementById('parsedRowsCard').style.display = 'none';
     document.getElementById('compareCard').style.display = 'none';
+    renderRouteMetaCard();
     setUploadStatus('No file uploaded yet.');
 }
 window.clearChainageFile = clearChainageFile;

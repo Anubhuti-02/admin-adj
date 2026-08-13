@@ -17,6 +17,7 @@ const TIMEZONE = "Asia/Kolkata";
 function getTimezoneTimestamp() {
     return DateTime.now().setZone(TIMEZONE).toFormat("yyyy-MM-dd'T'HH:mm:ss.SSS");
 }
+
 // ═════════════════════════════════════════════════════════════════════════
 // ── SENSOR REGISTRY — single source of truth for every accelerometer ──────
 // To add a new accelerometer in future: add one entry here, assign it an
@@ -270,6 +271,7 @@ let chainagePreview = loadChainagePreview();
 console.log('[chainage-preview] Loaded:', chainagePreview ? `${chainagePreview.rows.length} rows` : 'none');
 
 // ── Report archival — on-demand export archives + continuous raw log ──────
+
 // REPORTS_DIR defaults to the external Geonix drive (932GB) so the
 // continuous raw/impact/km-wise logs land directly on it rather than the
 // server's local disk — set REPORTS_DIR_OVERRIDE in .env to point elsewhere
@@ -297,12 +299,12 @@ function resolveReportsDir() {
     return path.join(__dirname, 'reports');
 }
 const REPORTS_DIR         = resolveReportsDir();
+
 const IMPACT_REPORTS_DIR  = path.join(REPORTS_DIR, 'impact_events');
 const TESTRUN_REPORTS_DIR = path.join(REPORTS_DIR, 'test_runs');
 const KMWISE_REPORTS_DIR  = path.join(REPORTS_DIR, 'km_wise');
 const RAW_LOG_DIR         = path.join(REPORTS_DIR, 'raw_log');
 
-console.log(`[reports] Writing continuous report logs to: ${REPORTS_DIR}`);
 [IMPACT_REPORTS_DIR, TESTRUN_REPORTS_DIR, KMWISE_REPORTS_DIR, RAW_LOG_DIR].forEach(d => {
     try { fs.mkdirSync(d, { recursive: true }); }
     catch (e) { console.error(`[reports] Could not create ${d}:`, e.message); }
@@ -540,6 +542,7 @@ async function initDB() {
                 sd_v REAL, sd_l REAL, p2p_v REAL, p2p_l REAL,
                 peak REAL, fs REAL, window_ms REAL
             );
+            ALTER TABLE monitoring_data ADD COLUMN IF NOT EXISTS distance_m REAL;
             CREATE TABLE IF NOT EXISTS realtime_data (
                 id        SERIAL PRIMARY KEY,
                 timestamp TIMESTAMPTZ NOT NULL,
@@ -594,7 +597,8 @@ function normMonitoring(r) {
         rmsV: r.rms_v, rmsL: r.rms_l,
         sdV:  r.sd_v,  sdL:  r.sd_l,
         p2pV: r.p2p_v, p2pL: r.p2p_l,
-        peak: r.peak, fs: r.fs, window_ms: r.window_ms
+        peak: r.peak, fs: r.fs, window_ms: r.window_ms,
+        distance_m: r.distance_m
     };
 }
 
@@ -1086,7 +1090,6 @@ app.get('/api/impacts', async (req, res) => {
         }
 
         if (pgReady) {
-            const limit = (from || to || hours) ? 2000 : 2000;
             const r = await pool.query(`
                 SELECT * FROM accelerometer_events
                 ${where}
@@ -1160,15 +1163,9 @@ app.get('/api/historical/graph/:hours', async (req, res) => {
 });
 
 app.get('/api/realtime/status', (req, res) => {
-    // receiving_data used to require a message within the last 10s, which
-    // flickered to "Offline" on the UI during any normal gap between
-    // hardware readings longer than that — even while the bridge itself
-    // was fully connected and healthy. Now it just mirrors the MQTT
-    // bridge's connection state: Live means "connected to the bridge",
-    // Offline means "the bridge connection is actually down".
     res.json({
         connected:          mqttConnected,
-        receiving_data:     mqttConnected,
+        receiving_data:     mqttConnected && lastDataTimestamp && (Date.now() - lastDataTimestamp < 10000),
         last_data_received: lastDataTimestamp,
         time_since_last:    lastDataTimestamp ? Math.floor((Date.now() - lastDataTimestamp) / 1000) : null
     });
@@ -1394,7 +1391,7 @@ app.get('/api/monitoring/all', async (req, res) => {
         if (!pgReady) return res.status(503).json({ error: 'Database not ready' });
         const r = await pool.query(`
             SELECT device_id, x_axis, y_axis, z_axis, g_force, rms_v, rms_l,
-                   sd_v, sd_l, p2p_v, p2p_l, peak, fs, window_ms, timestamp, type
+                   sd_v, sd_l, p2p_v, p2p_l, peak, fs, window_ms, distance_m, timestamp, type
             FROM monitoring_data ORDER BY timestamp ASC LIMIT 500000
         `);
         res.json(r.rows.map(normMonitoring));
@@ -1713,9 +1710,9 @@ async function handleBinarySensorPacket(sensorMeta, message, timestamp) {
     if (pgReady) {
         pool.query(
             `INSERT INTO monitoring_data
-             (timestamp, type, device_id, x_axis, y_axis, z_axis, g_force, rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l, peak)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-            [timestamp, 'accelerometer', sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak]
+             (timestamp, type, device_id, x_axis, y_axis, z_axis, g_force, rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l, peak, distance_m)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+            [timestamp, 'accelerometer', sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, totalDistanceM]
         ).catch(e => console.error('monitoring_data insert:', e.message));
 
         pool.query(
@@ -1883,9 +1880,9 @@ mqttClient.on('message', async (topic, message) => {
         if (pgReady) {
             pool.query(
                 `INSERT INTO monitoring_data
-                 (timestamp, type, device_id, x_axis, y_axis, z_axis, g_force, rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l, peak, fs, window_ms)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
-                [timestamp, 'accelerometer', sensorSide, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, fs, win]
+                 (timestamp, type, device_id, x_axis, y_axis, z_axis, g_force, rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l, peak, fs, window_ms, distance_m)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+                [timestamp, 'accelerometer', sensorSide, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, fs, win, totalDistanceM]
             ).catch(e => console.error('monitoring_data insert:', e.message));
 
             pool.query(
@@ -2122,9 +2119,9 @@ async function processRawAccelReading(sensorMeta, stats, timestamp) {
     if (pgReady) {
         pool.query(
             `INSERT INTO monitoring_data
-             (timestamp, type, device_id, x_axis, y_axis, z_axis, g_force, rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l, peak, fs, window_ms)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
-            [timestamp, 'accelerometer', sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, fs, windowMs]
+             (timestamp, type, device_id, x_axis, y_axis, z_axis, g_force, rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l, peak, fs, window_ms, distance_m)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+            [timestamp, 'accelerometer', sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, fs, windowMs, totalDistanceM]
         ).catch(e => console.error('monitoring_data insert:', e.message));
 
         pool.query(
@@ -2284,12 +2281,6 @@ if (fs.existsSync(httpsCertPath) && fs.existsSync(httpsKeyPath)) {
             cert: fs.readFileSync(httpsCertPath),
             key:  fs.readFileSync(httpsKeyPath),
         }, app);
-        // Socket.IO must be explicitly attached to this second server too —
-        // otherwise a page loaded over HTTPS gets static files/REST fine but
-        // its live socket.io connection fails, since `io` was only ever
-        // bound to the original HTTP `server` above. attach() shares the
-        // same io instance/state (rooms, event handlers, etc.), it does not
-        // create a second independent Socket.IO server.
         io.attach(httpsServer, { cors: { origin: '*', methods: ['GET', 'POST'] } });
         httpsServer.listen(HTTPS_PORT, () => {
             console.log(`HTTPS also available: https://${LOCAL_IP}:${HTTPS_PORT}/index.html (self-signed — accept the browser warning once per machine)`);
@@ -2419,6 +2410,79 @@ app.get('/api/test-report/csv', async (req, res) => {
         res.status(500).send('Export failed: ' + e.message);
     }
 });
+
+// ── Shared impact-CSV builder — used by both the manual export endpoint
+// and the automatic background archiver below, so the two never drift.
+const IMPACT_CSV_HEADERS = ['timestamp', 'sensor', 'severity', 'p_class', 'peak_g', 'rmsV', 'rmsL', 'sdV', 'sdL', 'p2pV', 'p2pL', 'x', 'y', 'z', 'fs', 'window_ms', 'distance_m', 'lat', 'lng'];
+function buildImpactCsv(docs) {
+    const fmt = v => (v == null || v === undefined) ? '' : String(v);
+    const rows = docs.map(d => [
+        fmt(d.timestamp), fmt(d.sensor), fmt(d.severity),
+        // ★ PIVOT CHANGE — pass d.sensor so a fallback classification (when
+        // p_class wasn't stored) uses the right threshold set for pivot rows
+        fmt(d.p_class || getPClass(d.peak_g, d.sensor) || ''),
+        fmt(d.peak_g != null ? (+d.peak_g).toFixed(6) : ''),
+        fmt(d.rmsV != null ? (+d.rmsV).toFixed(3) : ''), fmt(d.rmsL != null ? (+d.rmsL).toFixed(3) : ''),
+        fmt(d.sdV != null ? (+d.sdV).toFixed(3) : ''), fmt(d.sdL != null ? (+d.sdL).toFixed(3) : ''),
+        fmt(d.p2pV != null ? (+d.p2pV).toFixed(3) : ''), fmt(d.p2pL != null ? (+d.p2pL).toFixed(3) : ''),
+        fmt(d.x != null ? (+d.x).toFixed(3) : ''), fmt(d.y != null ? (+d.y).toFixed(3) : ''), fmt(d.z != null ? (+d.z).toFixed(3) : ''),
+        fmt(d.fs != null ? d.fs : ''), fmt(d.window_ms != null ? d.window_ms : ''),
+        fmt(d.distance_m != null ? d.distance_m : '0'),
+        fmt(d.lat != null ? (+d.lat).toFixed(6) : ''), fmt(d.lng != null ? (+d.lng).toFixed(6) : '')
+    ].join(','));
+    return [IMPACT_CSV_HEADERS.join(','), ...rows].join('\n');
+}
+
+// ── Automatic impact-report archiving — writes a CSV of new impact events
+// to IMPACT_REPORTS_DIR on a timer, with no user interaction required.
+// The manual "Export CSV" button below still works exactly as before and
+// is completely independent of this.
+const AUTO_IMPACT_ARCHIVE_STATE_FILE = path.join(__dirname, 'auto_impact_archive_state.json');
+const AUTO_IMPACT_ARCHIVE_INTERVAL_MS = parseInt(process.env.AUTO_IMPACT_ARCHIVE_INTERVAL_MS, 10) || 3600000; // default: every 1 hour
+
+function loadAutoImpactArchiveState() {
+    try {
+        if (fs.existsSync(AUTO_IMPACT_ARCHIVE_STATE_FILE)) {
+            const saved = JSON.parse(fs.readFileSync(AUTO_IMPACT_ARCHIVE_STATE_FILE, 'utf8'));
+            if (saved.lastArchivedAt) return saved.lastArchivedAt;
+        }
+    } catch (e) { console.error('auto_impact_archive_state.json read error:', e.message); }
+    return null; // first run — will fall back to "since server start"
+}
+function saveAutoImpactArchiveState(lastArchivedAt) {
+    try { fs.writeFileSync(AUTO_IMPACT_ARCHIVE_STATE_FILE, JSON.stringify({ lastArchivedAt }, null, 2)); }
+    catch (e) { console.error('auto_impact_archive_state.json write error:', e.message); }
+}
+
+let autoImpactArchiveCursor = loadAutoImpactArchiveState() || new Date().toISOString();
+
+async function autoArchiveImpactEvents() {
+    if (!pgReady) return;
+    try {
+        const since = autoImpactArchiveCursor;
+        const r = await pool.query(
+            `SELECT * FROM accelerometer_events WHERE timestamp > $1 ORDER BY timestamp ASC`,
+            [since]
+        );
+        if (!r.rows.length) return; // nothing new — don't write an empty file every hour
+
+        const docs = r.rows.map(normImpact);
+        const csv  = buildImpactCsv(docs);
+        const newestTs = docs[docs.length - 1].timestamp;
+        const archiveName = `${routePrefix()}impact_report_auto_${archiveTimestamp()}.csv`;
+
+        fs.writeFileSync(path.join(IMPACT_REPORTS_DIR, archiveName), csv);
+        console.log(`[auto-archive] Wrote ${docs.length} impact record(s) → ${archiveName}`);
+
+        autoImpactArchiveCursor = newestTs;
+        saveAutoImpactArchiveState(autoImpactArchiveCursor);
+    } catch (e) {
+        console.error('[auto-archive] Failed:', e.message);
+    }
+}
+// Kick off shortly after startup (once DB/reports dirs are ready), then repeat on the interval.
+setTimeout(autoArchiveImpactEvents, 10000);
+setInterval(autoArchiveImpactEvents, AUTO_IMPACT_ARCHIVE_INTERVAL_MS);
 
 // ── Impacts CSV export — unchanged, already sensor-agnostic ────────────────
 app.get('/api/impacts/export/csv', async (req, res) => {
@@ -2643,6 +2707,33 @@ function deriveKmLengths(rows) {
     return lengths;
 }
 
+// Direction + KM span are read entirely from the uploaded file's own row
+// order — nothing hardcoded. Chainage tapes are laid out in the direction
+// of increasing chainage as walked; if km numbers fall as you go down the
+// file (e.g. 192 → 76) that's a down-line (DN) tape, rising = up-line (UP).
+function deriveRouteDirection(rows) {
+    if (!rows.length) return { direction: null, kmFrom: null, kmTo: null };
+    const firstKm = rows[0].km;
+    const lastKm  = rows[rows.length - 1].km;
+    return {
+        direction: lastKm < firstKm ? 'DN' : (lastKm > firstKm ? 'UP' : null),
+        kmFrom: firstKm,
+        kmTo: lastKm,
+    };
+}
+
+// Total real-world span of the tape in metres, using each KM's actual
+// surveyed length (from KM Post markers) where known, falling back to a
+// flat 1000m for any KM the tape didn't include a post for.
+function deriveTotalRouteMeters(rows, kmLengths) {
+    if (!rows.length) return 0;
+    const { kmFrom, kmTo } = deriveRouteDirection(rows);
+    const lo = Math.min(kmFrom, kmTo), hi = Math.max(kmFrom, kmTo);
+    let total = 0;
+    for (let k = lo; k < hi; k++) total += (kmLengths[k] || 1000);
+    return total;
+}
+
 const chainagePreviewUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
 app.get('/api/chainage-preview', (req, res) => res.json(chainagePreview));
@@ -2657,11 +2748,17 @@ app.post('/api/chainage-preview', chainagePreviewUpload.single('file'), (req, re
     }
     if (!rows.length) return res.status(400).json({ error: 'No parseable rows found in file' });
 
+    const routeMeta = deriveRouteDirection(rows);
+    const kmLengths = deriveKmLengths(rows);
     chainagePreview = {
         sourceFileName: req.file.originalname,
         uploadedAt: getTimezoneTimestamp(),
         rows,
-        kmLengths: deriveKmLengths(rows),
+        kmLengths,
+        direction: routeMeta.direction,       // 'UP' or 'DN', read from the file's own row order
+        kmFrom: routeMeta.kmFrom,             // e.g. 192 — taken directly from the tape, not hardcoded
+        kmTo: routeMeta.kmTo,                 // e.g. 76
+        totalRouteMeters: deriveTotalRouteMeters(rows, kmLengths),
     };
     saveChainagePreview(chainagePreview);
     console.log(`[chainage-preview] Uploaded ${req.file.originalname}: ${rows.length} rows`);

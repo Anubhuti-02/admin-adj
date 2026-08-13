@@ -131,7 +131,12 @@ function shouldEmit(sensorId) {
 const PEAKS_LOG_FILE     = path.join(__dirname, 'peaks_log.json');
 const LIMITS_CONFIG_FILE = path.join(__dirname, 'limits_config.json');
 const AXIS_LIMITS_FILE = path.join(__dirname, 'axis_limits.json');
-const DEFAULT_AXIS_LIMIT = 0.5; // single g-value floor per axis, same idea as p1Min for thresholds
+// Matches thresholds.json's own p1Min floor (2g) — a lower default (previously
+// 0.5g, briefly 1g) sat below this sensor's normal ~1.0-1.08g baseline, so
+// nearly every reading counted as an "impact", flooding peaks_log.json
+// (467,923 entries / 11.4MB before the PEAKS_LOG_MAX_ENTRIES cap above) and
+// eventually OOM-crashing the process during JSON.stringify().
+const DEFAULT_AXIS_LIMIT = 2;
 
 function defaultAxisLimitsShape() {
     return {
@@ -192,6 +197,17 @@ function getLocalIP() {
 }
 const LOCAL_IP = getLocalIP();
 
+// Hard cap on peaksLog's length — this is the local-file fallback used only
+// when Postgres isn't ready (accelerometer_events is the real, unbounded
+// store), so it never needs unlimited history. Without a cap this file grew
+// to 11.4MB / 467,923 entries (axis-limit thresholds set too low flagged
+// nearly every reading as an "impact"), and JSON.stringify()'ing the whole
+// array on every single new push eventually OOM-crashed the process —
+// after which no /api/impacts data could be served at all, from either
+// Postgres or the file, until the process was manually restarted. Matches
+// the 2000-row cap /api/impacts already applies to its own Postgres query.
+const PEAKS_LOG_MAX_ENTRIES = 2000;
+
 function loadPeaksLog() {
     try {
         if (fs.existsSync(PEAKS_LOG_FILE)) return JSON.parse(fs.readFileSync(PEAKS_LOG_FILE, 'utf8'));
@@ -202,7 +218,18 @@ function savePeaksLog(log) {
     try { fs.writeFileSync(PEAKS_LOG_FILE, JSON.stringify(log, null, 2)); }
     catch (e) { console.error('peaks_log.json write error:', e.message); }
 }
+/** Appends `impact` to peaksLog and trims from the front if over the cap — use this instead of peaksLog.push() directly. */
+function pushToPeaksLog(impact) {
+    peaksLog.push(impact);
+    if (peaksLog.length > PEAKS_LOG_MAX_ENTRIES) {
+        peaksLog.splice(0, peaksLog.length - PEAKS_LOG_MAX_ENTRIES);
+    }
+}
 let peaksLog = loadPeaksLog();
+if (peaksLog.length > PEAKS_LOG_MAX_ENTRIES) {
+    peaksLog = peaksLog.slice(-PEAKS_LOG_MAX_ENTRIES);
+    savePeaksLog(peaksLog); // shrink the on-disk file immediately too, not just the in-memory copy
+}
 console.log(`Loaded ${peaksLog.length} existing impact records from JSON fallback`);
 
 function loadLimitsConfig() {
@@ -288,12 +315,27 @@ console.log('[chainage-preview] Loaded:', chainagePreview ? `${chainagePreview.r
 // this server needs the same one-time `/etc/fstab` line added locally —
 // see the project notes for the exact entry.
 const GEONIX_MOUNT_PATH = '/mnt/geonix/UABAMS_reports';
+/**
+ * fs.existsSync(path.dirname(GEONIX_MOUNT_PATH)) used to be the check here,
+ * but /mnt/geonix is a real directory (the mount point itself, owned by
+ * root) whether or not the drive is actually mounted into it — so an
+ * unplugged drive still passed that check, then failed with EACCES trying
+ * to mkdir inside the empty root-owned mount point. This instead checks
+ * /proc/mounts for an actual active mount at that path, which only true
+ * when the drive is really there.
+ */
+function isMounted(dirPath) {
+    try {
+        const mounts = fs.readFileSync('/proc/mounts', 'utf8');
+        return mounts.split('\n').some(line => line.split(' ')[1] === dirPath);
+    } catch (e) {
+        return false; // non-Linux or unreadable — treat as not mounted, fall through to local
+    }
+}
 function resolveReportsDir() {
     if (process.env.REPORTS_DIR_OVERRIDE) return process.env.REPORTS_DIR_OVERRIDE;
-    try {
-        if (fs.existsSync(path.dirname(GEONIX_MOUNT_PATH))) return GEONIX_MOUNT_PATH;
-    } catch (e) { /* fall through to local */ }
-    console.warn('[reports] Geonix drive not found at expected mount path — falling back to local reports/ folder.');
+    if (isMounted(path.dirname(GEONIX_MOUNT_PATH))) return GEONIX_MOUNT_PATH;
+    console.warn('[reports] Geonix drive not mounted at expected path — falling back to local reports/ folder.');
     return path.join(__dirname, 'reports');
 }
 const REPORTS_DIR         = resolveReportsDir();
@@ -817,11 +859,11 @@ app.post('/api/axis-limits', (req, res) => {
 });
 
 // DELETE — clears any user-saved values and resets every axis back to the
-// 0.5g default (matches /api/thresholds's DELETE-resets-to-default behavior)
+// 2g default (matches /api/thresholds's DELETE-resets-to-default behavior)
 app.delete('/api/axis-limits', (req, res) => {
     axisLimitsConfig = defaultAxisLimitsShape();
     saveAxisLimitsToFile(axisLimitsConfig);
-    console.log('[axis-limits] Reset to default (0.5g):', axisLimitsConfig);
+    console.log('[axis-limits] Reset to default (2g):', axisLimitsConfig);
     io.emit('axis-limits-updated', axisLimitsConfig);
     res.json({ success: true, axisLimits: axisLimitsConfig });
 });
@@ -1739,7 +1781,7 @@ async function handleBinarySensorPacket(sensorMeta, message, timestamp) {
             timestamp, sensor: sensorId, severity, peak_g: peakVal, gForce,
             rmsV, rmsL, sdV, sdL, p2pV, p2pL, x, y, z, distance_m: totalDistanceM, p_class: pClass
         };
-        peaksLog.push(impact);
+        pushToPeaksLog(impact);
         savePeaksLog(peaksLog);
         if (pgReady) {
             const hasGpsFix = lastGpsCoord?.lat && lastGpsCoord?.lng;
@@ -1907,7 +1949,7 @@ mqttClient.on('message', async (topic, message) => {
                 rmsV, rmsL, sdV, sdL, p2pV, p2pL, x, y, z, fs, window_ms: win,
                 distance_m: totalDistanceM, p_class: pClass
             };
-            peaksLog.push(impact);
+            pushToPeaksLog(impact);
             savePeaksLog(peaksLog);
 
             if (pgReady) {
@@ -2146,7 +2188,7 @@ async function processRawAccelReading(sensorMeta, stats, timestamp) {
             rmsV, rmsL, sdV, sdL, p2pV, p2pL, x, y, z, fs, window_ms: windowMs,
             distance_m: totalDistanceM, p_class: pClass
         };
-        peaksLog.push(impact);
+        pushToPeaksLog(impact);
         savePeaksLog(peaksLog);
         if (pgReady) {
             const hasGpsFix = lastGpsCoord?.lat && lastGpsCoord?.lng;

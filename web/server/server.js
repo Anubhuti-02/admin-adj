@@ -1205,9 +1205,17 @@ app.get('/api/historical/graph/:hours', async (req, res) => {
 });
 
 app.get('/api/realtime/status', (req, res) => {
+    // receiving_data used to require a message within the last 10s, which
+    // flickered to "Offline" on the UI during any normal gap between
+    // hardware readings longer than that — even while the bridge itself
+    // was fully connected and healthy. It just mirrors the MQTT bridge's
+    // connection state instead: Live means "connected to the bridge",
+    // Offline means "the bridge connection is actually down". (Second
+    // time fixing this — PR #13 was based on pre-fix dev and silently
+    // reverted it on merge, since this line had no textual conflict.)
     res.json({
         connected:          mqttConnected,
-        receiving_data:     mqttConnected && lastDataTimestamp && (Date.now() - lastDataTimestamp < 10000),
+        receiving_data:     mqttConnected,
         last_data_received: lastDataTimestamp,
         time_since_last:    lastDataTimestamp ? Math.floor((Date.now() - lastDataTimestamp) / 1000) : null
     });

@@ -178,11 +178,22 @@ let axisLimitsConfig = loadAxisLimits();
 // lowering a limit in the UI also lowers the detection floor.
 // ─────────────────────────────────────────────────────────────────────────
 const FALLBACK_IMPACT_DETECTION_THRESHOLD_G = 2;
+// Was gated purely by axisLimitsConfig — lowering p1Min in Threshold
+// Configuration had no effect on whether a reading became an event at all,
+// only on how an already-logged event got classified, which read as
+// "changing the threshold does nothing" from the operator's side. Now also
+// takes the lower of the two P1 floors (axle sensors vs pivot), so either
+// threshold screen genuinely controls what gets detected, not just how it's
+// labeled afterward. pClassThresholds/pivotClassThresholds are declared
+// further down this file but that's fine — this function's body only runs
+// when called, well after module-load finishes.
 function impactDetectionThreshold() {
     const all = [
         ...Object.values(axisLimitsConfig.generic || {}),
         ...Object.values(axisLimitsConfig.a1 || {}),
         ...Object.values(axisLimitsConfig.a2 || {}),
+        pClassThresholds?.p1Min,
+        pivotClassThresholds?.p1Min,
     ].filter(v => typeof v === 'number' && !isNaN(v) && v > 0);
     return all.length ? Math.min(...all) : FALLBACK_IMPACT_DETECTION_THRESHOLD_G;
 }

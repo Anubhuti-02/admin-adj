@@ -1706,6 +1706,24 @@ mqttClient.on('connect', () => {
     });
 });
 
+// ── Rolling per-sensor magnitude window, used to compute gForce the same
+// way peak is computed: max(sqrt(x²+y²+z²)) over a trailing time window —
+// rather than just the instantaneous magnitude of the latest sample.
+// Shared by the binary-packet and MQTT-text handlers below, which (unlike
+// AccelWindow's raw-sample boards) only ever get one x/y/z reading per
+// message, so the "window" has to be built up across messages instead of
+// across samples within one message.
+const GFORCE_WINDOW_MS = 250; // matches AccelWindow/ACCEL_WINDOW_MS cadence
+const gForceWindows = {}; // { sensorId: [{ t, mag }, ...] }
+function windowedGForce(sensorId, x, y, z) {
+    const now = Date.now();
+    const mag = Math.sqrt(x**2 + y**2 + z**2);
+    const buf = gForceWindows[sensorId] || (gForceWindows[sensorId] = []);
+    buf.push({ t: now, mag });
+    while (buf.length && now - buf[0].t > GFORCE_WINDOW_MS) buf.shift();
+    return Math.max(...buf.map(s => s.mag));
+}
+
 // ── Shared helper: process one sensor's 68-byte binary reading, generic ────
 async function handleBinarySensorPacket(sensorMeta, message, timestamp) {
     const sensorId = sensorMeta.id;
@@ -1730,7 +1748,10 @@ async function handleBinarySensorPacket(sensorMeta, message, timestamp) {
 
     const lat    = +(latRaw / 1e6).toFixed(6);
     const lng    = +(lonRaw / 1e6).toFixed(6);
-    const gForce = Math.sqrt(x**2 + y**2 + z**2);
+    // gForce uses the same definition as peak — max magnitude over a
+    // trailing window — computed in software from this sensor's recent
+    // readings, rather than the instantaneous sqrt(x²+y²+z²) of this sample.
+    const gForce = windowedGForce(sensorId, x, y, z);
 
     console.log(`[binary] [${sensorId}]: Ax=${x.toFixed(4)} Ay=${y.toFixed(4)} Az=${z.toFixed(4)} gForce=${gForce.toFixed(4)} PEAK=${peak.toFixed(4)} GPS=${lat},${lng} SAT=${sats}`);
 
@@ -1935,7 +1956,10 @@ mqttClient.on('message', async (topic, message) => {
         const fs   = fsm   ? parseInt(fsm[1])      : null;
         const win  = winm  ? parseInt(winm[1])     : null;
 
-        const gForce = Math.sqrt(x**2 + y**2 + z**2);
+        // gForce uses the same definition as peak — max magnitude over a
+        // trailing window — computed in software from this sensor's recent
+        // readings, rather than the instantaneous sqrt(x²+y²+z²) of this sample.
+        const gForce = windowedGForce(sensorSide, x, y, z);
         console.log(`Parsed [${sensorSide}]: x=${x} y=${y} z=${z} peak=${peak} gForce=${gForce.toFixed(4)}`);
 
         if (pgReady) {
@@ -2139,14 +2163,17 @@ class AccelWindow {
             const mean = vals.reduce((a, v) => a + v, 0) / vals.length;
             return Math.sqrt(vals.reduce((a, v) => a + (v - mean) ** 2, 0) / vals.length);
         };
+        const peak = Math.max(...magnitudes);
         const stats = {
             x: last.x, y: last.y, z: last.z,
-            gForce: Math.sqrt(last.x**2 + last.y**2 + last.z**2),
+            // gForce mirrors peak (windowed max magnitude across this
+            // window's samples) rather than just the last sample's magnitude.
+            gForce: peak,
             rmsV: rms(vert), rmsL: rms(lat),
             sdV: sd(vert),   sdL: sd(lat),
             p2pV: Math.max(...vert) - Math.min(...vert),
             p2pL: Math.max(...lat)  - Math.min(...lat),
-            peak: Math.max(...magnitudes),
+            peak,
             fs: samples.length / elapsedS,
             windowMs: ACCEL_WINDOW_MS,
         };

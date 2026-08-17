@@ -425,8 +425,18 @@ function appendRawLog(sensorId, row) {
             gpsLat, gpsLon,
         ].join(',') + '\n';
 
-        fs.appendFileSync(file, isNew ? RAW_LOG_HEADER + line : line);
+        fs.appendFileSync(file, isNew ? rawLogThresholdBanner() + RAW_LOG_HEADER + line : line);
     } catch (e) { console.error('[raw_log] append failed:', e.message); }
+}
+
+// One-line "# ..." comment prepended to each new day's raw log, showing the
+// P1/P2/P3 min-thresholds in effect when the file was started — so anyone
+// reading the CSV later knows what limits classified these readings, without
+// having to cross-reference thresholds.json separately. Axle (AB-L/AB-R) and
+// pivot (TRC-P/TV-P) get their own thresholds since pivot's bands are lower.
+function rawLogThresholdBanner() {
+    const fmt = t => `P1:${t.p1Min}G,P2:${t.p2Min}G,P3:${t.p3Min}G(Min Threshold)`;
+    return `# AXLE ${fmt(pClassThresholds)} | PIVOT ${fmt(pivotClassThresholds)}\n`;
 }
 
 // ── Express / Socket.IO / Postgres ─────────────────────────────────────────

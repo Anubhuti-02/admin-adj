@@ -570,12 +570,7 @@ const server = http.createServer(app);
 const io     = socketIo(server, { cors: { origin: '*', methods: ['GET', 'POST'] } });
 
 app.use(cors());
-// 15mb to accommodate full-day KM-wise report CSVs posted to
-// /api/reports/km-wise — the default 100kb was silently rejecting those
-// (413, swallowed by the client's fire-and-forget archive fetch) before
-// that route's own express.json({limit:'15mb'}) ever got a chance to run,
-// since this global parser consumes the body first.
-app.use(express.json({ limit: '15mb' }));
+app.use(express.json({limit: '15mb'}));
 app.use(express.static(path.join(__dirname, '../client')));
 
 // ── PostgreSQL schema init ────────────────────────────────────────────────
@@ -608,7 +603,7 @@ async function initDB() {
                 x_axis REAL, y_axis REAL, z_axis REAL,
                 g_force REAL, rms_v REAL, rms_l REAL,
                 sd_v REAL, sd_l REAL, p2p_v REAL, p2p_l REAL,
-                peak REAL, fs REAL, window_ms REAL
+                peak REAL, fs REAL, window_ms REAL, distance_m REAL
             );
             ALTER TABLE monitoring_data ADD COLUMN IF NOT EXISTS distance_m REAL;
             CREATE TABLE IF NOT EXISTS realtime_data (
@@ -617,7 +612,7 @@ async function initDB() {
                 sensor    TEXT NOT NULL,
                 x REAL, y REAL, z REAL,
                 g_force REAL, rms_v REAL, rms_l REAL,
-                sd_v REAL, sd_l REAL, p2p_v REAL, p2p_l REAL, peak REAL
+                sd_v REAL, sd_l REAL, p2p_v REAL, p2p_l REAL, peak REAL, fs REAL, window_ms REAL, distance_m REAL   
             );
             CREATE TABLE IF NOT EXISTS rm_gps (
                 id               SERIAL PRIMARY KEY,
@@ -1239,11 +1234,16 @@ app.get('/api/realtime/status', (req, res) => {
     // Offline means "the bridge connection is actually down". (Second
     // time fixing this — PR #13 was based on pre-fix dev and silently
     // reverted it on merge, since this line had no textual conflict.)
+    const now = Date.now();
+    const mostRecentSensorSeen = Math.max(0, ...Object.values(sensorLastSeen));
+    const tcpReceivingData = mostRecentSensorSeen > 0 && (now - mostRecentSensorSeen) < SENSOR_TIMEOUT_MS;
+    const effectiveLastData = Math.max(lastDataTimestamp || 0, mostRecentSensorSeen) || null;
+
     res.json({
-        connected:          mqttConnected,
-        receiving_data:     mqttConnected,
-        last_data_received: lastDataTimestamp,
-        time_since_last:    lastDataTimestamp ? Math.floor((Date.now() - lastDataTimestamp) / 1000) : null
+        connected:          mqttConnected || tcpReceivingData,
+        receiving_data:     tcpReceivingData || !!(mqttConnected && lastDataTimestamp && (now - lastDataTimestamp < 10000)),
+        last_data_received: effectiveLastData,
+        time_since_last:    effectiveLastData ? Math.floor((now - effectiveLastData) / 1000) : null
     });
 });
 
@@ -1768,6 +1768,7 @@ async function handleBinarySensorPacket(sensorMeta, message, timestamp) {
     // readings, rather than the instantaneous sqrt(x²+y²+z²) of this sample.
     const gForce = windowedGForce(sensorId, x, y, z);
 
+
     console.log(`[binary] [${sensorId}]: Ax=${x.toFixed(4)} Ay=${y.toFixed(4)} Az=${z.toFixed(4)} gForce=${gForce.toFixed(4)} PEAK=${peak.toFixed(4)} GPS=${lat},${lng} SAT=${sats}`);
 
     sensorLastSeen[sensorId] = Date.now();
@@ -2188,7 +2189,7 @@ class AccelWindow {
             sdV: sd(vert),   sdL: sd(lat),
             p2pV: Math.max(...vert) - Math.min(...vert),
             p2pL: Math.max(...lat)  - Math.min(...lat),
-            peak,
+            peak: Math.max(...magnitudes),
             fs: samples.length / elapsedS,
             windowMs: ACCEL_WINDOW_MS,
         };
@@ -2651,18 +2652,23 @@ app.get('/api/impacts/export/csv', async (req, res) => {
 });
 
 // ── KM-wise report archive — client already builds the CSV; just persist it ──
-// (body-size limit is set globally above — a route-local override here was
-// ineffective since the global express.json() already consumes the body first)
-app.post('/api/reports/km-wise', (req, res) => {
-    const { csv, reportDate } = req.body || {};
+// Called both by the manual "Export CSV" button and by the frontend's silent
+// auto-save (on hardware disconnect, or on page/tab/system close via
+// sendBeacon — see acceleration-km.js). Both paths write into the exact same
+// KMWISE_REPORTS_DIR — the only difference is the filename tag, so manual and
+// auto-saved reports are easy to tell apart on disk without living in
+// separate folders.
+app.post('/api/reports/km-wise', express.json({ limit: '15mb' }), (req, res) => {
+    const { csv, reportDate, auto, reason } = req.body || {};
     if (!csv || typeof csv !== 'string') {
         return res.status(400).json({ success: false, error: 'csv (string) required' });
     }
     const safeDate = (reportDate || new Date().toISOString().slice(0, 10)).replace(/[^0-9-]/g, '');
-    const archiveName = `${routePrefix()}KM_Report_${safeDate}_${archiveTimestamp()}.csv`;
+    const tag = auto ? `_auto_${(reason || 'unspecified').replace(/[^a-z0-9-]/gi, '')}` : '';
+    const archiveName = `${routePrefix()}KM_Report_${safeDate}${tag}_${archiveTimestamp()}.csv`;
     try {
         fs.writeFileSync(path.join(KMWISE_REPORTS_DIR, archiveName), csv);
-        console.log(`[reports] Archived to ${archiveName}`);
+        console.log(`[reports] Archived to ${archiveName}${auto ? ` (auto: ${reason})` : ''}`);
         res.json({ success: true, archived: archiveName });
     } catch (e) {
         console.error('[reports] Archive write failed:', e.message);

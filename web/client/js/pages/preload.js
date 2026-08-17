@@ -29,20 +29,29 @@ async function preloadSensorReadings() {
 
             // Northern Central panel (index.html)
             if (side === 'left') {
-                const vert = Math.abs(d.z ?? 0);
-                const lat  = Math.sqrt((d.x??0)**2 + (d.y??0)**2);
+                // Y is vertical, X is lateral — matches ACCEL_AXIS_MAP on the
+                // server. Was previously reading vert from Z and lat from
+                // sqrt(x²+y²), which is wrong.
+                const vert = Math.abs(d.y ?? 0);
+                const lat  = Math.abs(d.x ?? 0);
                 _set('ablVert', vert.toFixed(4) + ' g');
                 _set('ablLat',  lat.toFixed(4)  + ' g');
             }
             if (side === 'right') {
-                const vert = Math.abs(d.z ?? 0);
-                const lat  = Math.sqrt((d.x??0)**2 + (d.y??0)**2);
+                // Y is vertical, X is lateral — matches ACCEL_AXIS_MAP on the
+                // server. Was previously reading vert from Z and lat from
+                // sqrt(x²+y²), which is wrong.
+                const vert = Math.abs(d.y ?? 0);
+                const lat  = Math.abs(d.x ?? 0);
                 _set('abrVert', vert.toFixed(4) + ' g');
                 _set('abrLat',  lat.toFixed(4)  + ' g');
             }
             if (side === 'pivot') {
-                const vert = Math.abs(d.z ?? 0);
-                const lat  = Math.sqrt((d.x??0)**2 + (d.y??0)**2);
+                // Y is vertical, X is lateral — matches ACCEL_AXIS_MAP on the
+                // server. Was previously reading vert from Z and lat from
+                // sqrt(x²+y²), which is wrong.
+                const vert = Math.abs(d.y ?? 0);
+                const lat  = Math.abs(d.x ?? 0);
                 _set('abpVert', vert.toFixed(4) + ' g');
                 _set('abpLat',  lat.toFixed(4)  + ' g');
             }

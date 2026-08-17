@@ -207,9 +207,10 @@ async function loadHistoricalRange() {
             const km = Math.floor(distM / 1000), rem = distM % 1000;
             labels.push(km + '.' + String(rem).padStart(3, '0') + ' km');
             distTimestamps.push((left[i] || right[i] || {}).timestamp || null);
-            if (left[i])  { const {x=0,y=0,z=0} = left[i];  lVert.push(Math.abs(z)); lLat.push(Math.sqrt(x*x+y*y)); }
+            // Y is vertical, X is lateral — matches ACCEL_AXIS_MAP on the server.
+            if (left[i])  { const {x=0,y=0} = left[i];  lVert.push(Math.abs(y)); lLat.push(Math.abs(x)); }
             else          { lVert.push(null); lLat.push(null); }
-            if (right[i]) { const {x=0,y=0,z=0} = right[i]; rVert.push(Math.abs(z)); rLat.push(Math.sqrt(x*x+y*y)); }
+            if (right[i]) { const {x=0,y=0} = right[i]; rVert.push(Math.abs(y)); rLat.push(Math.abs(x)); }
             else          { rVert.push(null); rLat.push(null); }
         }
 

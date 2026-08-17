@@ -557,9 +557,11 @@ function connectToBackend() {
 
         const x    = data.x ?? 0;
         const y    = data.y ?? 0;
-        const z    = data.z ?? 0;
-        const vert = Math.abs(z);
-        const lat  = Math.sqrt(x * x + y * y);
+        // Y is vertical, X is lateral — matches ACCEL_AXIS_MAP on the server
+        // (confirmed against physical mounting). Was previously reading
+        // vert from Z and lat from sqrt(x²+y²), which is wrong.
+        const vert = Math.abs(y);
+        const lat  = Math.abs(x);
 
         sensorCache[side].vert = vert;
         sensorCache[side].lat  = lat;

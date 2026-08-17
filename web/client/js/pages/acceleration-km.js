@@ -25,8 +25,22 @@
     // measured position actually falls inside that block/KM's real span.
     // ═════════════════════════════════════════════════════════════════════
 
+    // "Real" distance means the system is moving RIGHT NOW — checked via the
+    // most recent record only, not "has any record in this batch ever shown
+    // distance_m > 0". That distinction matters: if simulate-distance.js (or
+    // real GPS) was active earlier in this same uninterrupted run and then
+    // stopped, the sensor keeps streaming — but every NEW row reverts to
+    // distance_m = 0 (server.js's own totalDistanceM only advances on a real
+    // GPS fix; simulate-distance.js only patches the DB directly, it doesn't
+    // touch that in-memory value). A stale non-zero record from earlier in
+    // the run would otherwise wrongly commit the whole batch to
+    // distance-based bucketing, and every current static record (distance_m
+    // = 0) would pile into BLK1. Checking only the latest record reflects
+    // "is it dynamic right now" — exactly what should decide the mode.
     function hasDistanceData(docs) {
-        return docs.some(d => d.distance_m != null);
+        if (!docs.length) return false;
+        const latest = docs[docs.length - 1]; // docs are timestamp-sorted asc
+        return latest.distance_m != null && latest.distance_m > 0;
     }
 
     // Cumulative real distance (m) at the START of route-tape KM index idx,
@@ -68,18 +82,19 @@
 
     // ═════════════════════════════════════════════════════════════════════
     // ── LEGACY RECORD-COUNT FALLBACK ────────────────────────────────────────
-    // Only used when a KM's docs have NO distance_m at all — e.g. a bench
-    // test with no GPS fix and simulate-distance.js not running. Keeps the
-    // report showing *something* instead of going blank, using the old
-    // ODR-based estimate. Any record with a real distance_m always takes
-    // the precise path above instead.
+    // Used whenever a KM's docs show no real distance movement (distance_m
+    // is null, or stuck at 0 because there's no GPS fix / simulator running
+    // — see hasDistanceData() above). Keeps the report showing *something*
+    // instead of going blank, using a fixed 250-records-per-200m-block
+    // estimate. The instant any record shows real distance_m > 0, the
+    // precise distance-based path above takes over automatically.
     // ═════════════════════════════════════════════════════════════════════
-    const RECORDS_PER_KM = 250;
+    const RECORDS_PER_BLOCK = 200; // assumed records per 200m block, used only while distance_m isn't available (e.g. GPS not connected)
 
-    function getRecordsPerKm() {
-        if (typeof AccelConfig === 'undefined') return RECORDS_PER_KM;
+    function getRecordsPerBlock() {
+        if (typeof AccelConfig === 'undefined') return RECORDS_PER_BLOCK;
         const avg = (AccelConfig.getOdr(1) + AccelConfig.getOdr(2)) / 2;
-        return Math.max(Math.round(RECORDS_PER_KM / Math.round(200 / avg)), 1);
+        return Math.max(Math.round(RECORDS_PER_BLOCK / Math.round(200 / avg)), 1);
     }
 
     function splitRecordsByBlockWeight(docs, blockLengths) {
@@ -93,8 +108,11 @@
         });
     }
 
+    // Nominal record count for a KM of real length L, scaled from the
+    // 250-records-per-200m-block baseline (was previously per-1000m, which
+    // undercounted each individual block by 5x).
     function expectedRecordsForKmLength(lengthM) {
-        return Math.max(1, Math.round(getRecordsPerKm() * (lengthM / 1000)));
+        return Math.max(1, Math.round(getRecordsPerBlock() * (lengthM / 200)));
     }
 
     function cumulativeCursorUpTo(idx) {
@@ -117,14 +135,16 @@
     }
 
     // Decides which route-tape KM a set of "current session" docs is
-    // presently within. Prefers real distance_m; falls back to the
-    // ODR-based record-count estimate only when none of the docs carry a
-    // distance_m value at all.
+    // presently within. Checks only the MOST RECENT record's distance_m —
+    // not "does any record in the session have distance_m > 0" — so stale
+    // distance data from an earlier phase of this same run (see
+    // hasDistanceData() above) can't wrongly commit the session to
+    // distance-based resolution while it's actually sitting static now.
     function resolveCurrentKm(sessionDocs) {
-        const distDocs = sessionDocs.filter(d => d.distance_m != null);
-        if (distDocs.length) {
-            const latestDistance = distDocs[distDocs.length - 1].distance_m; // docs are timestamp-sorted asc
-            return { usedDistance: true, loc: routeTapeKmForDistance(latestDistance) };
+        if (!sessionDocs.length) return { usedDistance: false, progress: null };
+        const latest = sessionDocs[sessionDocs.length - 1]; // timestamp-sorted asc
+        if (latest.distance_m != null && latest.distance_m > 0) {
+            return { usedDistance: true, loc: routeTapeKmForDistance(latest.distance_m) };
         }
         return { usedDistance: false, progress: routeTapeProgress(sessionDocs.length) };
     }
@@ -132,28 +152,31 @@
     // Builds a KM card using real route-tape block lengths. Prefers
     // distance-based block placement (equalizing route-tape meters against
     // each record's real distance_m); falls back to the old length-weighted
-    // record split only for docs with no distance_m at all. hwLive+isPartial
-    // blocks with no records yet assigned show as "Collecting…".
+    // record split only for docs with no distance_m at all.
+    // Empty blocks render as dashes (no "Collecting…" placeholder).
     function buildRouteTapeCard(kmDocsSlice, kmNum, kmStart, hwLive) {
         const L = routeTapeData.kmLengths[kmNum];
         const kmEnd = kmStart + L;
         const blockLengths = blocksForKmLength(L);
         const useDistance = hasDistanceData(kmDocsSlice);
 
-        const blockSplits = useDistance
-            ? splitRecordsByDistance(kmDocsSlice, kmStart, blockLengths)
-            : splitRecordsByBlockWeight(kmDocsSlice, blockLengths);
-
         const expectedRecords = useDistance ? null : expectedRecordsForKmLength(L);
         const isPartial = useDistance
             ? kmDocsSlice.reduce((m, d) => d.distance_m != null ? Math.max(m, d.distance_m) : m, kmStart) < kmEnd
             : kmDocsSlice.length < expectedRecords;
 
+        // While this KM is still partial (live collecting), spread samples
+        // across blocks by record weight so every row shows live averages
+        // even when distance_m has not advanced past the first 200m (bench /
+        // stationary). Once the KM is complete, use real distance placement.
+        const blockSplits = (useDistance && !isPartial)
+            ? splitRecordsByDistance(kmDocsSlice, kmStart, blockLengths)
+            : splitRecordsByBlockWeight(kmDocsSlice, blockLengths);
+
+        // Always render every block in real time. Empty slices show as "—"
+        // via computeBlock([]) — no "Collecting…" placeholder rows.
         const blocks = blockLengths.map((len, i) => {
             const bdocs = blockSplits[i] || [];
-            if (!bdocs.length && hwLive && isPartial) {
-                return { label: `BLK${i + 1} (${len}m)`, pending: true };
-            }
             const c = computeBlock(bdocs, i);
             c.label = `BLK${i + 1} (${len}m)`;
             return c;
@@ -171,7 +194,7 @@
             lastTimestamp: kmDocsSlice[kmDocsSlice.length - 1]?.timestamp ?? null,
             blocks,
             peakDist:      computePeakDist(kmDocsSlice),
-            worstPeaks:    computeWorstPeaks(kmDocsSlice),
+            worstPeaks:    computeWorstPeaks(kmDocsSlice, useDistance),
             usedRouteTape: true,
         };
     }
@@ -205,12 +228,25 @@
         }
         return cards;
     }
+    const POLL_MS = 5000;
     let lastCard = null;
     let allDocs = [];
     let todayDocs = [];
     let lastFetchTime = 0;
     let limitsConfig = null;   // loaded from /api/limits-config
-    let isLive = false;        // set by setStatus(); read by renderCard()
+
+    // ── Peak-distribution thresholds — same source as the Configuration page
+    // (axle: /api/thresholds, pivot: /api/thresholds/pivot). These are the
+    // P1/P2/P3 min/max RAW-value bands a person sets on Configuration, and
+    // peak distribution here now classifies every raw x_axis/y_axis reading
+    // against them directly — left+right both use the axle set, pivot uses
+    // its own set, exactly mirroring server.js's thresholdsFor()/getPClass().
+    // No hardcoded defaults here — null until loadThresholdsConfig() fetches
+    // whatever the user has actually configured (or not configured) server-side. ──
+    let thresholdsConfig = {
+        axle:  null,
+        pivot: null,
+    };
 
     // ── Route tape (real KM chainage) ───────────────────────────────────────────
     // When a route tape has been uploaded via Chainage Preview, /api/chainage-preview
@@ -317,6 +353,42 @@
         };
     }
 
+    // ─── Peak-distribution thresholds (axle + pivot raw-value bands) ─────────────
+    async function loadThresholdsConfig() {
+        try {
+            const [axleRes, pivotRes] = await Promise.all([
+                fetch('/api/thresholds'),
+                fetch('/api/thresholds/pivot'),
+            ]);
+            if (axleRes.ok) {
+                const axle = await axleRes.json();
+                if ([axle.p1Min, axle.p1Max, axle.p2Min, axle.p2Max, axle.p3Min].every(v => v != null && !isNaN(v))) {
+                    thresholdsConfig.axle = axle;
+                }
+            }
+            if (pivotRes.ok) {
+                const pivot = await pivotRes.json();
+                if ([pivot.p1Min, pivot.p1Max, pivot.p2Min, pivot.p2Max, pivot.p3Min].every(v => v != null && !isNaN(v))) {
+                    thresholdsConfig.pivot = pivot;
+                }
+            }
+            console.log('[km] Peak-distribution thresholds loaded:', thresholdsConfig);
+        } catch (e) {
+            console.warn('[km] Could not load axle/pivot thresholds:', e.message);
+        }
+    }
+    if (typeof io !== 'undefined') {
+        const _kmThresholdSocket = io(window.location.origin);
+        _kmThresholdSocket.on('thresholds-updated', (t) => {
+            thresholdsConfig.axle = t;
+            if (lastCard) renderCard(lastCard);
+        });
+        _kmThresholdSocket.on('pivot-thresholds-updated', (t) => {
+            thresholdsConfig.pivot = t;
+            if (lastCard) renderCard(lastCard);
+        });
+    }
+
     // ─── Limits config ───────────────────────────────────────────────────────────
     async function loadLimitsConfig() {
         try {
@@ -329,69 +401,138 @@
         }
     }
 
-    // Returns { p1, p2, p3 } thresholds for a given side+axis from LC config.
-    // Falls back to hardcoded values if not configured.
-    function getLCPeakThresholds(side, axis) {
-    const accelKey = side === 'right' ? 'accel2' : side === 'pivot' ? 'accel3' : 'accel1';
-        const axisKey  = axis === 'V'     ? 'vert'   : 'lat';
-        const lc = limitsConfig?.limitClass?.[accelKey]?.[axisKey]?.peak;
-        if (lc?.p1 != null && lc?.p2 != null && lc?.p3 != null) return lc;
-        return { p1: 5, p2: 10, p3: 20 };
+    // Returns the raw-value P1/P2/P3 min/max band set for a given side —
+    // left+right both use the axle band (thresholdsConfig.axle), pivot uses
+    // its own (thresholdsConfig.pivot). Same set for both V and L axes,
+    // mirroring server.js's thresholdsFor(sensorId).
+    function getRawPeakThresholds(side) {
+        return side === 'pivot' ? thresholdsConfig.pivot : thresholdsConfig.axle;
     }
 
+    // Classifies a raw axis reading into P1/P2/P3 using min/max RANGES
+    // (not single cutoffs) — identical logic to server.js's getPClass():
+    // P3: g >= p3Min · P2: p2Min <= g < p2Max · P1: p1Min <= g < p1Max.
+    // Returns null (unclassified) if thresholds haven't loaded from the
+    // server yet — never falls back to a made-up default.
+    function classifyRawPeak(g, thresholds) {
+        if (g == null || isNaN(g) || !thresholds) return null;
+        const v = Math.abs(g);
+        if (v >= +thresholds.p3Min)                                     return 'P3';
+        if (v >= +thresholds.p2Min && v < +thresholds.p2Max)            return 'P2';
+        if (v >= +thresholds.p1Min && v < +thresholds.p1Max)            return 'P1';
+        return null;
+    }
 
     function computePeakDist(docs) {
         const out = {
             left:  { V: { P1:0, P2:0, P3:0 }, L: { P1:0, P2:0, P3:0 } },
             right: { V: { P1:0, P2:0, P3:0 }, L: { P1:0, P2:0, P3:0 } },
             pivot: { V: { P1:0, P2:0, P3:0 }, L: { P1:0, P2:0, P3:0 } }
-            
-        };
-        // Classify a value against { p1, p2, p3 } thresholds from LC config (or fallback)
-        const getPClass = (g, thresholds) => {
-            if (g == null || isNaN(g)) return null;
-            const v = Math.abs(g);
-            if (v >= +thresholds.p3) return 'P3';
-            if (v >= +thresholds.p2) return 'P2';
-            if (v >= +thresholds.p1) return 'P1';
-            return null;
+
         };
         for (const d of docs) {
             const side = d.device_id === 'right' ? 'right' : (d.device_id === 'pivot' ? 'pivot' : 'left');
-            const pV = getPClass(d.y_axis, getLCPeakThresholds(side, 'V'));
-            const pL = getPClass(d.x_axis, getLCPeakThresholds(side, 'L'));
+            const thresholds = getRawPeakThresholds(side);
+            const pV = classifyRawPeak(d.y_axis, thresholds);
+            const pL = classifyRawPeak(d.x_axis, thresholds);
             if (pV) out[side].V[pV]++;
             if (pL) out[side].L[pL]++;
         }
         return out;
     }
 
-    function computeWorstPeaks(docs) {
-        const b = { 'L-LAT': [], 'L-VERT': [], 'R-LAT': [], 'R-VERT': [], 'P-LAT': [], 'P-VERT': [] };
-        for (const d of docs) {
-            const side = d.device_id === 'right' ? 'right' : (d.device_id === 'pivot' ? 'pivot' : 'left');
-            const vert = d.y_axis != null ? Math.abs(d.y_axis) : null;
+    // Shared key-mapping + per-slice max helper, used by both worst-peaks
+    // strategies below.
+    const WORST_PEAK_KEYS = ['L-LAT', 'L-VERT', 'R-LAT', 'R-VERT', 'P-LAT', 'P-VERT'];
+    function emptyWorstPeaks() { return Object.fromEntries(WORST_PEAK_KEYS.map(k => [k, []])); }
+    function worstPeakKeyFor(d) {
+        const side = d.device_id === 'right' ? 'right' : (d.device_id === 'pivot' ? 'pivot' : 'left');
+        return {
+            lat:  side === 'left' ? 'L-LAT'  : side === 'right' ? 'R-LAT'  : 'P-LAT',
+            vert: side === 'left' ? 'L-VERT' : side === 'right' ? 'R-VERT' : 'P-VERT',
+        };
+    }
+    function worstPeakMaxInSlice(slice) {
+        const cur = Object.fromEntries(WORST_PEAK_KEYS.map(k => [k, null]));
+        for (const d of slice) {
+            const { lat: latKey, vert: vertKey } = worstPeakKeyFor(d);
             const lat  = d.x_axis != null ? Math.abs(d.x_axis) : null;
-            if (side === 'left') {
-                if (vert != null) b['L-VERT'].push(vert);
-                if (lat != null)  b['L-LAT'].push(lat);
-            } else if (side === 'right') {
-                if (vert != null) b['R-VERT'].push(vert);
-                if (lat != null)  b['R-LAT'].push(lat);
-            } else if (side === 'pivot') {
-                if (vert != null) b['P-VERT'].push(vert);
-                if (lat != null)  b['P-LAT'].push(lat);
+            const vert = d.y_axis != null ? Math.abs(d.y_axis) : null;
+            if (lat  != null) cur[latKey]  = cur[latKey]  == null ? lat  : Math.max(cur[latKey],  lat);
+            if (vert != null) cur[vertKey] = cur[vertKey] == null ? vert : Math.max(cur[vertKey], vert);
+        }
+        return cur;
+    }
+
+    // Worst peaks while STATIC (bench test / no real distance movement):
+    // there's no notion of "completed KMs" yet, so instead take the highest
+    // |raw| reading seen in every successive 1000-record window of the
+    // running session — column 1 = most recent 1000-record window, column 2
+    // = the window before that, etc. This grows a new column every 1000
+    // records as the session accumulates, which is what was asked for.
+    function computeWorstPeaksStatic(docs) {
+        if (!docs || !docs.length) return emptyWorstPeaks();
+        const CHUNK = 1000;
+        const out = emptyWorstPeaks();
+        const windowMaxes = Object.fromEntries(WORST_PEAK_KEYS.map(k => [k, []]));
+        for (let i = 0; i < docs.length; i += CHUNK) {
+            const cur = worstPeakMaxInSlice(docs.slice(i, i + CHUNK));
+            for (const k of WORST_PEAK_KEYS) {
+                if (cur[k] != null) windowMaxes[k].push(+cur[k].toFixed(1));
             }
         }
-        const top10 = arr => arr.sort((a,b)=>b-a).slice(0,10).map(v=>+v.toFixed(1));
-        return {
-            'L-LAT':  top10(b['L-LAT']),
-            'L-VERT': top10(b['L-VERT']),
-            'R-LAT':  top10(b['R-LAT']),
-            'R-VERT': top10(b['R-VERT']),
-            'P-LAT':  top10(b['P-LAT']),
-            'P-VERT': top10(b['P-VERT']),
-        };
+        for (const k of WORST_PEAK_KEYS) {
+            // reverse so column 1 = most recent 1000-record max
+            out[k] = windowMaxes[k].reverse().slice(0, 10);
+        }
+        return out;
+    }
+
+    // Worst peaks while IN MOTION (real distance_m data): one column per
+    // COMPLETED km, most recently completed first, up to 10 columns — each
+    // column is the single highest |raw| reading recorded anywhere inside
+    // that km (left/right/pivot × lat/vert, tracked independently). The
+    // currently in-progress km (kmIdx) is included as column 1 with its
+    // running max so far; kmIdx-1, kmIdx-2, … fill the remaining columns as
+    // already-completed kms.
+    function computeWorstPeaksByKm(sessionDocs, kmIdx) {
+        const out = emptyWorstPeaks();
+        if (!routeTapeData || !routeTapeKmNums.length) return out;
+        const idxList = [];
+        for (let idx = kmIdx; idx >= 0 && idxList.length < 10; idx--) idxList.push(idx);
+
+        for (const idx of idxList) {
+            if (idx < 0 || idx >= routeTapeKmNums.length) continue;
+            const km = routeTapeKmNums[idx];
+            const kmStart = cumulativeDistanceStart(idx);
+            const kmEnd = kmStart + routeTapeData.kmLengths[km];
+            const slice = sessionDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
+            const cur = worstPeakMaxInSlice(slice);
+            for (const k of WORST_PEAK_KEYS) {
+                out[k].push(cur[k] != null ? +cur[k].toFixed(1) : null);
+            }
+        }
+        // Trim fully-empty trailing columns so short sessions don't render
+        // a wall of dashes past the last km that actually has any data.
+        for (const k of WORST_PEAK_KEYS) {
+            while (out[k].length && out[k][out[k].length - 1] == null) out[k].pop();
+        }
+        return out;
+    }
+
+    // Legacy single-call wrapper kept for buildRouteTapeCard()/CSV export,
+    // which only ever have one km's docs in hand at a time (no access to
+    // "completed kms" history) — static path is unchanged; dynamic path
+    // falls back to a single running-max column for that one km's own docs.
+    function computeWorstPeaks(docs, useDistance) {
+        if (!docs || !docs.length) return emptyWorstPeaks();
+        if (!useDistance) return computeWorstPeaksStatic(docs);
+        const cur = worstPeakMaxInSlice(docs);
+        const out = emptyWorstPeaks();
+        for (const k of WORST_PEAK_KEYS) {
+            if (cur[k] != null) out[k] = [+cur[k].toFixed(1)];
+        }
+        return out;
     }
 
     // buildCard() (the fixed/nominal-KM fallback used when no route tape is
@@ -432,7 +573,7 @@
                 <thead>
                     <tr><th rowspan="3">LOC</th><th colspan="4">LEFT</th><th colspan="4">RIGHT</th><th colspan="4">PIVOT</th></tr>
                     <tr><th colspan="2">RMS</th><th colspan="2">SD</th><th colspan="2">RMS</th><th colspan="2">SD</th><th colspan="2">RMS</th><th colspan="2">SD</th></tr>
-                    <tr><th>V</th><th>L</th><th>V</th><th>L</th><th>V</th><th>L</th><th>V</th><th>L</th></tr>
+                    <tr><th>V</th><th>L</th><th>V</th><th>L</th><th>V</th><th>L</th><th>V</th><th>L</th><th>V</th><th>L</th><th>V</th><th>L</th></tr>
                 </thead>
                 <tbody>${rows}</tbody>
             </table>
@@ -443,28 +584,34 @@
         if (!peakDist) return '<p class="no-data">No distribution data yet.</p>';
         const l = peakDist.left, r = peakDist.right, p = peakDist.pivot || { V:{}, L:{} };
 
-        // Show which thresholds are driving the classification
-        const lcConfigured = limitsConfig?.limitClass != null;
-        const thresholdNote = lcConfigured
-            ? (() => {
-                const t = getLCPeakThresholds('left', 'V');   // representative row
-                return `<div style="font-size:10px;color:#64748b;margin-bottom:6px;font-style:italic;">
-                    Using LC thresholds — P1 ≥ ${t.p1}g &nbsp;·&nbsp; P2 ≥ ${t.p2}g &nbsp;·&nbsp; P3 ≥ ${t.p3}g
-                    <span style="color:#94a3b8">(per axis — hover row for details)</span>
-                </div>`;
-            })()
+        // Show which thresholds are driving the classification — pulled live
+        // from the Configuration page (axle: /api/thresholds, pivot: /api/thresholds/pivot).
+        // If either hasn't loaded yet (server unreachable, or no config saved
+        // yet), say so plainly instead of inventing a number.
+        const axleT = thresholdsConfig.axle, pivotT = thresholdsConfig.pivot;
+        const rangeStr = t => `P1 ${t.p1Min}–${t.p1Max}g &nbsp;·&nbsp; P2 ${t.p2Min}–${t.p2Max}g &nbsp;·&nbsp; P3 ≥ ${t.p3Min}g`;
+        const thresholdNote = (axleT && pivotT)
+            ? `<div style="font-size:10px;color:#64748b;margin-bottom:6px;font-style:italic;">
+                Using Configuration thresholds — Axle (L/R): ${rangeStr(axleT)}
+                <br>Pivot: ${rangeStr(pivotT)}
+                <a href="configuration.html" style="color:#64748b;">Configure →</a>
+            </div>`
             : `<div style="font-size:10px;color:#c2410c;margin-bottom:6px;font-style:italic;">
-                ⚠ Limit Class not configured — using defaults (P1≥5g, P2≥10g, P3≥20g).
-                <a href="sampling-frequency.html" style="color:#c2410c;">Configure →</a>
+                ⚠ Thresholds not loaded from Configuration yet — counts below may be blank.
+                <a href="configuration.html" style="color:#c2410c;">Configure →</a>
             </div>`;
+
+        const bandTip = (side, band) => {
+            const t = getRawPeakThresholds(side);
+            if (!t) return 'Not configured yet';
+            if (band === 'P1') return `P1: ${t.p1Min}g – ${t.p1Max}g`;
+            if (band === 'P2') return `P2: ${t.p2Min}g – ${t.p2Max}g`;
+            return `P3: ≥ ${t.p3Min}g`;
+        };
 
         const bandRow = band => {
             const cls = band.toLowerCase();
-            // Per-axis thresholds for tooltip
-            const tip = (side, axis) => {
-                const t = getLCPeakThresholds(side, axis);
-                return `${band} ≥ ${t[band.toLowerCase()]}g`;
-            };
+            const tip = (side, axis) => bandTip(side, band);
             return `<tr>
                 <td><span class="badge badge-${cls}">${band}</span></td>
                 <td class="count-badge count-${cls}" title="${tip('left','V')}">${l.V[band]||0}</td>
@@ -485,10 +632,18 @@
         </div>`;
     }
 
-    function renderWorstPeaksTable(worstPeaks) {
+    function renderWorstPeaksTable(worstPeaks, distanceBased) {
         if (!worstPeaks) return '<p class="no-data">No peak data yet.</p>';
 
         const params = ['L-LAT', 'L-VERT', 'R-LAT', 'R-VERT', 'P-LAT', 'P-VERT'];
+
+        const modeNote = distanceBased
+            ? `<div style="font-size:10px;color:#64748b;margin-bottom:6px;font-style:italic;">
+                In motion — each column is the worst reading from one completed KM (1 = current/most recent, going back).
+            </div>`
+            : `<div style="font-size:10px;color:#64748b;margin-bottom:6px;font-style:italic;">
+                Stationary — each column is the worst reading from a 1,000-record window (1 = most recent).
+            </div>`;
 
         const rows = params.map(param => {
             const vals = worstPeaks[param] || [];
@@ -507,6 +662,7 @@
 
         return `
         <div class="table-container worst-peaks-table">
+            ${modeNote}
             <table>
                 <thead>
                     <tr>
@@ -532,11 +688,14 @@
         if (data.historical) {
             badge = `<span class="historical-badge"><i class="fas fa-history"></i> Last Session</span>`;
         } else if (data.isPartial && isLive) {
-            const progressLabel = data.distanceBased
-                ? `${data.recordsSoFar} pts`
-                : `${data.recordsSoFar}/${data.recordsExpected}`;
-            badge = `<span class="live-badge"><i class="fas fa-circle blink"></i> LIVE &nbsp;<span style="font-size:11px">${progressLabel}</span></span>`;
+            badge = `<span class="live-badge"><i class="fas fa-circle blink"></i> LIVE</span>`;
         }
+
+        // Records-recorded count — always shown for this KM, not just while
+        // it's still partial/live, so it never silently disappears.
+        const recordsLabel = data.distanceBased
+            ? `${data.recordsSoFar} pts`
+            : (data.recordsExpected ? `${data.recordsSoFar}/${data.recordsExpected} pts` : `${data.recordsSoFar} pts`);
 
         container.innerHTML = `
         <div class="km-block${data.isPartial && isLive ? ' km-live' : ''}">
@@ -544,6 +703,7 @@
                 <div class="km-header-left">
                     <span><i class="fas fa-map-pin"></i> Km From: ${data.kmFrom}</span>
                     <span><i class="fas fa-map-pin"></i> Km To: ${data.kmTo}</span>
+                    <span class="records-count-badge"><i class="fas fa-database"></i> ${recordsLabel}</span>
                     ${badge}
                 </div>
                 <div class="km-header-right">
@@ -560,13 +720,26 @@
             </div>
             <div class="section" style="display:${wD}">
                 <div class="section-title"><i class="fas fa-chart-line"></i> Worst Peaks</div>
-                ${renderWorstPeaksTable(data.worstPeaks)}
+                ${renderWorstPeaksTable(data.worstPeaks, data.distanceBased)}
             </div>
         </div>`;
     }
 
     // ─── Status helpers ─────────────────────────────────────────────────────────
+    let isLive = false; // tracks hardware-live status; read by renderCard()'s LIVE badge logic
+    let prevHwLive = null; // null = not yet known (startup); used only to detect a live→offline EDGE
     function setStatus(live) {
+        // Detect the moment hardware goes from live → offline and fire a
+        // silent, one-shot archive of today's report. Guarded so it only
+        // fires on the transition (not every poll tick while offline), and
+        // skipped on the very first status read after page load (prevHwLive
+        // === null) so opening the dashboard while hardware is already
+        // offline doesn't trigger a spurious "disconnect" save.
+        if (prevHwLive === true && live === false) {
+            autoSaveTodayReport('hardware-disconnected');
+        }
+        prevHwLive = live;
+
         isLive = live;
         const dot    = document.getElementById('hw-status');
         const label  = document.getElementById('hw-status-label');
@@ -617,9 +790,34 @@
         }
     }
 
+    // Isolates the trailing CONTIGUOUS run of records from a day's worth of
+    // docs — i.e. the current test session, not "everything logged today."
+    // Without this, a disconnect/reconnect on the bench means the new
+    // static-test records get lumped in with an earlier run from the same
+    // day that had real distance_m > 0 (e.g. a moving test, or
+    // simulate-distance.js). resolveCurrentKm() would then find that old
+    // non-zero distance data, commit the whole day to distance-based
+    // bucketing, and every new static record (distance_m = 0) would pile
+    // into BLK1 since 0 always satisfies ">= kmStart && < 200". A run break
+    // is detected as any gap between consecutive records wider than
+    // RUN_GAP_MINUTES — a disconnect/reconnect always produces one.
+    const RUN_GAP_MINUTES = 5;
+    function currentRunDocs(docs, gapMinutes = RUN_GAP_MINUTES) {
+        if (docs.length <= 1) return docs;
+        const gapMs = gapMinutes * 60000;
+        for (let i = docs.length - 1; i > 0; i--) {
+            const gap = new Date(docs[i].timestamp) - new Date(docs[i - 1].timestamp);
+            if (gap > gapMs) return docs.slice(i);
+        }
+        return docs; // no gap found — the whole day is one continuous run
+    }
+
     async function updateReport() {
-        // 0. Fetch limits config (keeps peak distribution in sync with configuration page)
+      try {
+        // 0. Fetch limits config + axle/pivot P-class thresholds (keeps peak
+        // distribution in sync with the Configuration page)
         await loadLimitsConfig();
+        await loadThresholdsConfig();
         // 0b. Fetch route tape data (Chainage Preview upload) — this is the ONLY
         // source of KM boundaries now. No route tape → no guessed fallback →
         // report shows a prompt instead of building anything.
@@ -662,8 +860,11 @@
         let sessionDocs, historical;
 
         if (hasTodayData) {
-            // Use today's data for live session
-            sessionDocs = todayDocs;
+            // Use today's data for live session — but only the current,
+            // contiguous run (see currentRunDocs() above), not everything
+            // logged today, so an earlier same-day run's distance_m can't
+            // leak into a later, unrelated session.
+            sessionDocs = currentRunDocs(todayDocs);
             historical = false;
 
             // ── Route-tape-driven KM sizing: real KM lengths from the RT file,
@@ -680,6 +881,7 @@
                         const kmDocsSlice = sessionDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
                         const card = buildRouteTapeCard(kmDocsSlice, km, kmStart, true);
                         card.historical = false;
+                        card.worstPeaks = computeWorstPeaksByKm(sessionDocs, kmIdx);
                         setStatus(hwLive);
                         setToolbarCount(kmIdx);
                         lastCard = card;
@@ -694,6 +896,7 @@
                         const card = buildRouteTapeCard(lastKmDocs, lastKm, kmStart, false);
                         card.historical = false;
                         card.routeTapeExhausted = true;
+                        card.worstPeaks = computeWorstPeaksByKm(sessionDocs, lastIdx);
                         setStatus(hwLive);
                         setToolbarCount(routeTapeKmNums.length);
                         lastCard = card;
@@ -734,6 +937,7 @@
                         const lastKmDocs = sessionDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
                         const card = buildRouteTapeCard(lastKmDocs, lastKm, kmStart, false);
                         card.historical = false;
+                        card.worstPeaks = computeWorstPeaksByKm(sessionDocs, lastIdx);
                         setStatus(hwLive);
                         setToolbarCount(completedIdx);
                         lastCard = card;
@@ -743,6 +947,7 @@
                         const kmDocsSlice = sessionDocs.filter(d => d.distance_m != null && d.distance_m < routeTapeData.kmLengths[firstKm]);
                         const card = buildRouteTapeCard(kmDocsSlice, firstKm, 0, false);
                         card.historical = false;
+                        card.worstPeaks = computeWorstPeaksByKm(sessionDocs, 0);
                         setStatus(hwLive);
                         setToolbarCount(0);
                         lastCard = card;
@@ -777,10 +982,11 @@
             return;
         }
 
-        // 4. No data today → fallback to the most recent date that has data
+        // 4. No data today → fallback to the most recent date that has data,
+        // isolated to its own trailing contiguous run for the same reason.
         const lastDoc = allDocs[allDocs.length - 1];
         const lastDate = lastDoc.timestamp.slice(0, 10);
-        const prevDayDocs = allDocs.filter(d => isSameDate(d.timestamp, lastDate));
+        const prevDayDocs = currentRunDocs(allDocs.filter(d => isSameDate(d.timestamp, lastDate)));
 
         const resolvedPrev = resolveCurrentKm(prevDayDocs);
 
@@ -794,6 +1000,7 @@
                 const lastKmDocs = prevDayDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
                 const card = buildRouteTapeCard(lastKmDocs, lastKm, kmStart, false);
                 card.historical = true;
+                card.worstPeaks = computeWorstPeaksByKm(prevDayDocs, lastIdx);
                 setStatus(hwLive);
                 setToolbarCount(completedIdxPrev);
                 lastCard = card;
@@ -803,6 +1010,7 @@
                 const kmDocsSlice = prevDayDocs.filter(d => d.distance_m != null && d.distance_m < routeTapeData.kmLengths[firstKm]);
                 const card = buildRouteTapeCard(kmDocsSlice, firstKm, 0, false);
                 card.historical = true;
+                card.worstPeaks = computeWorstPeaksByKm(prevDayDocs, 0);
                 setStatus(hwLive);
                 setToolbarCount(0);
                 lastCard = card;
@@ -834,6 +1042,21 @@
                 renderCard(card);
             }
         }
+      } catch (err) {
+        // Surface the real error on-screen instead of silently leaving the
+        // static HTML skeleton untouched — makes runtime bugs visible
+        // without needing to open DevTools.
+        console.error('[km] updateReport failed:', err);
+        const container = document.getElementById('km-container');
+        if (container) {
+            container.innerHTML = `
+                <div class="no-data-banner">
+                    <i class="fas fa-triangle-exclamation"></i>
+                    <p>Report failed to render.</p>
+                    <p style="color:#dc2626;font-size:12px;font-family:monospace;white-space:pre-wrap;text-align:left;max-width:700px;margin:8px auto;">${(err && err.stack) ? err.stack : String(err)}</p>
+                </div>`;
+        }
+      }
     }
 
     // ─── CSV Export (today's data only) ─────────────────────────────────────────
@@ -891,6 +1114,30 @@
             alert('No route tape uploaded yet.\n\nUpload a route tape (.DAT) on the Chainage Preview page before exporting a KM-wise report.');
             return;
         }
+
+        const csvContent = buildFullDayCSVString(docsForDay, reportDate);
+        if (!csvContent) return;
+
+        archiveReportToServer(csvContent, reportDate, false);
+
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `KM_Report_${reportDate}.csv`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+    }
+    window.exportCSV = exportCSV;
+
+    // Pure CSV-string builder — shared by the manual "Export CSV" button and
+    // the silent auto-save paths below, so both always produce byte-identical
+    // reports and both land in the exact same server-side archive folder.
+    function buildFullDayCSVString(docsForDay, reportDate) {
+        if (!docsForDay.length) return null;
+        if (!(routeTapeData && routeTapeKmNums.length)) return null;
 
         const rows = [];
 
@@ -971,68 +1218,89 @@
             rows.push("");   // separator between KMs
         }
 
-        // Download
-        const csvContent = rows.join("\n");
+        return rows.join("\n");
+    }
 
-        // Fire-and-forget server-side archive — must never delay/block the download
-        fetch('/api/reports/km-wise', {
+    // Posts a built CSV to the server archive endpoint — same endpoint, same
+    // KMWISE_REPORTS_DIR folder, regardless of whether the save was a manual
+    // "Export CSV" click or a silent auto-save. `auto`/`reason` just let the
+    // server tag the filename so auto-saves are distinguishable from manual
+    // exports on disk without living in a different folder.
+    function archiveReportToServer(csvContent, reportDate, auto, reason) {
+        return fetch('/api/reports/km-wise', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ csv: csvContent, reportDate })
-        }).catch(e => console.warn('[km-wise] Server archive failed (download unaffected):', e));
-
-        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-        const filename = `KM_Report_${reportDate}.csv`;
-
-        saveOrDownloadCSV(blob, filename);
+            body: JSON.stringify({ csv: csvContent, reportDate, auto: !!auto, reason: reason || null })
+        }).catch(e => console.warn('[km-wise] Server archive failed:', e));
     }
 
-    // Prefer the remembered save folder (e.g. the external drive) — same
-    // pattern as events.js's exportEvents(): falls back to the browser's
-    // normal download if nothing's been chosen yet, the write fails, or the
-    // browser doesn't support the File System Access API (Firefox/Safari).
-    async function saveOrDownloadCSV(blob, filename) {
+    // ─── Auto-save (hardware disconnect / system shutdown) ─────────────────────
+    // Silently builds + archives *today's* report server-side — no download,
+    // no prompt. Debounced per reportDate so a flapping connection (repeated
+    // live→offline→live→offline within the same day) can't spam the reports
+    // folder; at most one auto-save per date every AUTO_SAVE_COOLDOWN_MS.
+    const AUTO_SAVE_COOLDOWN_MS = 2 * 60 * 1000; // 2 minutes
+    let lastAutoSaveAt = 0;
+    let lastAutoSaveDate = null;
+
+    function autoSaveTodayReport(reason) {
         try {
-            if (typeof ReportSaveTarget !== 'undefined') {
-                const savedToFolder = await ReportSaveTarget.saveBlob(blob, filename);
-                if (savedToFolder) {
-                    if (typeof showReportSaveStatus === 'function') {
-                        showReportSaveStatus(`Saved "${filename}" to the chosen folder.`, false);
-                    }
-                    return;
-                }
-            }
-        } catch (e) {
-            console.error('[km] Direct save failed, falling back to browser download:', e);
-        }
+            if (!allDocs || !allDocs.length) return;
+            if (!(routeTapeData && routeTapeKmNums.length)) return; // nothing sane to build yet
 
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = filename;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        URL.revokeObjectURL(url);
+            const reportDate = getTodayStart();
+            const now = Date.now();
+            if (reportDate === lastAutoSaveDate && (now - lastAutoSaveAt) < AUTO_SAVE_COOLDOWN_MS) return;
+
+            const docsForDay = allDocs.filter(d => isSameDate(d.timestamp, reportDate));
+            if (!docsForDay.length) return;
+
+            const csvContent = buildFullDayCSVString(docsForDay, reportDate);
+            if (!csvContent) return;
+
+            lastAutoSaveAt = now;
+            lastAutoSaveDate = reportDate;
+            console.log(`[km-wise] Auto-saving today's report (${reason})`);
+            archiveReportToServer(csvContent, reportDate, true, reason);
+        } catch (e) {
+            console.warn('[km-wise] Auto-save skipped due to error:', e);
+        }
     }
-    window.exportCSV = exportCSV;
+
+    // Safety net for "the system turns off" while the dashboard tab is still
+    // open: browser/tab close, page navigation away, or the OS shutting down
+    // the machine all fire pagehide/beforeunload before the page dies.
+    // sendBeacon is used instead of fetch() because it's guaranteed to be
+    // sent even as the page is being torn down — a normal fetch can get
+    // cancelled mid-flight during unload.
+    function beaconSaveTodayReport(reason) {
+        try {
+            if (!allDocs || !allDocs.length) return;
+            if (!(routeTapeData && routeTapeKmNums.length)) return;
+            if (typeof navigator.sendBeacon !== 'function') return;
+
+            const reportDate = getTodayStart();
+            const docsForDay = allDocs.filter(d => isSameDate(d.timestamp, reportDate));
+            if (!docsForDay.length) return;
+
+            const csvContent = buildFullDayCSVString(docsForDay, reportDate);
+            if (!csvContent) return;
+
+            const payload = new Blob(
+                [JSON.stringify({ csv: csvContent, reportDate, auto: true, reason })],
+                { type: 'application/json' }
+            );
+            navigator.sendBeacon('/api/reports/km-wise', payload);
+        } catch (e) {
+            // Nothing more we can do — the page is unloading.
+        }
+    }
+    window.addEventListener('pagehide', () => beaconSaveTodayReport('page-closed'));
+    window.addEventListener('beforeunload', () => beaconSaveTodayReport('page-closed'));
 
     // ─── Polling ─────────────────────────────────────────────────────────────────
     async function poll() {
-        try {
-            await updateReport();
-        } catch (e) {
-            console.error('[km] updateReport failed:', e);
-            const container = document.getElementById('km-container');
-            if (container) {
-                container.innerHTML = `
-                    <div class="no-data-banner">
-                        <i class="fas fa-triangle-exclamation"></i>
-                        <p>Report failed to render.</p>
-                        <p style="color:#94a3b8;font-size:12px">${(e && e.message) || e}</p>
-                    </div>`;
-            }
-        }
+        await updateReport();
     }
 
     // ─── Initialise ─────────────────────────────────────────────────────────────

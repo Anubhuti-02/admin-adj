@@ -560,7 +560,12 @@ const server = http.createServer(app);
 const io     = socketIo(server, { cors: { origin: '*', methods: ['GET', 'POST'] } });
 
 app.use(cors());
-app.use(express.json());
+// 15mb to accommodate full-day KM-wise report CSVs posted to
+// /api/reports/km-wise — the default 100kb was silently rejecting those
+// (413, swallowed by the client's fire-and-forget archive fetch) before
+// that route's own express.json({limit:'15mb'}) ever got a chance to run,
+// since this global parser consumes the body first.
+app.use(express.json({ limit: '15mb' }));
 app.use(express.static(path.join(__dirname, '../client')));
 
 // ── PostgreSQL schema init ────────────────────────────────────────────────
@@ -2636,7 +2641,9 @@ app.get('/api/impacts/export/csv', async (req, res) => {
 });
 
 // ── KM-wise report archive — client already builds the CSV; just persist it ──
-app.post('/api/reports/km-wise', express.json({ limit: '15mb' }), (req, res) => {
+// (body-size limit is set globally above — a route-local override here was
+// ineffective since the global express.json() already consumes the body first)
+app.post('/api/reports/km-wise', (req, res) => {
     const { csv, reportDate } = req.body || {};
     if (!csv || typeof csv !== 'string') {
         return res.status(400).json({ success: false, error: 'csv (string) required' });

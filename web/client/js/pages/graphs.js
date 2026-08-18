@@ -260,7 +260,8 @@ function makeSubplot(id, color, initVal = 0) {
 
 const subplots = {
     s1: { x: makeSubplot('raw1X_chart', '#ef4444', 0), y: makeSubplot('raw1Y_chart', '#22c55e', 0), z: makeSubplot('raw1Z_chart', '#3b82f6', 9.8) },
-    s2: { x: makeSubplot('raw2X_chart', '#ef4444', 0), y: makeSubplot('raw2Y_chart', '#22c55e', 0), z: makeSubplot('raw2Z_chart', '#3b82f6', 9.8) }
+    s2: { x: makeSubplot('raw2X_chart', '#ef4444', 0), y: makeSubplot('raw2Y_chart', '#22c55e', 0), z: makeSubplot('raw2Z_chart', '#3b82f6', 9.8) },
+    s3: { x: makeSubplot('raw3X_chart', '#ef4444', 0), y: makeSubplot('raw3Y_chart', '#22c55e', 0), z: makeSubplot('raw3Z_chart', '#3b82f6', 9.8) }
 };
 
 function pushSubplot(chart, value) {
@@ -570,7 +571,8 @@ async function activateRCITab(days) {
 // ── Sensor cache ──────────────────────────────────────────────────────────
 const cache = {
     left: { x: 0, y: 0, z: 0, vert: 0, lat: 0, rms: null },
-    right: { x: 0, y: 0, z: 0, vert: 0, lat: 0, rms: null }
+    right: { x: 0, y: 0, z: 0, vert: 0, lat: 0, rms: null },
+    pivot: { x: 0, y: 0, z: 0, vert: 0, lat: 0, rms: null }
 };
 
 let rafPending = false;
@@ -649,7 +651,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 // ── Live data handler ─────────────────────────────────────────────────────
 socket.on('accelerometer-data', data => {
     const side = data.sensor;
-    if (side !== 'left' && side !== 'right') return;
+    if (side !== 'left' && side !== 'right' && side !== 'pivot') return;
 
     lastSensorDataTime = Date.now();
     updateOnlineStatus();
@@ -671,8 +673,8 @@ socket.on('accelerometer-data', data => {
     cache[side].rms = rmsV;   // store RMS (g)
 
     // Raw subplots
-    const sp = side === 'left' ? subplots.s1 : subplots.s2;
-    const pfx = side === 'left' ? 'raw1' : 'raw2';
+    const sp  = side === 'left' ? subplots.s1 : side === 'right' ? subplots.s2 : subplots.s3;
+    const pfx = side === 'left' ? 'raw1'       : side === 'right' ? 'raw2'       : 'raw3';
     pushSubplot(sp.x, x);
     pushSubplot(sp.y, y);
     pushSubplot(sp.z, z);

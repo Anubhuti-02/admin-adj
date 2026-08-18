@@ -246,6 +246,7 @@ async function fetchGPS() {
         document.getElementById('gps-lng').textContent      = lng;
         document.getElementById('gps-speed').textContent    = `${d.speedKmh} km/h`;
         document.getElementById('gps-distance').textContent = `${(d.totalDistanceM / 1000).toFixed(2)} km`;
+        document.getElementById('gps-speed-distance').textContent = `${(d.speedDistanceM / 1000).toFixed(2)} km`;
         document.getElementById('gps-lastfix').textContent  = ts.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false });
 
         const statusEl = document.getElementById('gps-status');

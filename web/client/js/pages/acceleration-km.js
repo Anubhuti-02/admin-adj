@@ -183,6 +183,10 @@
         });
 
         const isDn = routeTapeData.direction === 'DN';
+        const distanceCoveredM = useDistance
+            ? Math.max(0, (kmDocsSlice.reduce((m, d) => d.distance_m != null ? Math.max(m, d.distance_m) : m, kmStart) - kmStart))
+            : null;
+
         return {
             kmFrom:        kmNum,
             kmTo:          isDn ? kmNum - 1 : kmNum + 1,
@@ -190,11 +194,12 @@
             recordsSoFar:  kmDocsSlice.length,
             recordsExpected: expectedRecords,
             distanceBased: useDistance,
+            distanceCoveredM,
             isPartial,
             lastTimestamp: kmDocsSlice[kmDocsSlice.length - 1]?.timestamp ?? null,
             blocks,
             peakDist:      computePeakDist(kmDocsSlice),
-            worstPeaks:    computeWorstPeaks(kmDocsSlice, useDistance),
+            worstPeaks:    computeWorstPeaks(kmDocsSlice, useDistance, kmStart, blockLengths),
             usedRouteTape: true,
         };
     }
@@ -247,6 +252,37 @@
         axle:  null,
         pivot: null,
     };
+
+    // ── Axis Limit values — same source as Configuration page's "Axis Limit
+    // Values" section (/api/axis-limits). Shape: { generic:{x,y,z}, a1:{x,y,z},
+    // a2:{x,y,z} }, each leaf { p1, p2, p3 } as single raw-g cutoffs (not
+    // min/max ranges). Unit mapping mirrors configuration.html exactly:
+    // a1 = Left, a2 = Right, generic = Pivot. Peak Distribution below now
+    // classifies every raw y_axis (V) / x_axis (L) reading against these
+    // per-axis cutoffs instead of the old axle/pivot min-max thresholds.
+    // Null until loadAxisLimitsConfig() fetches the real saved values.
+    let axisLimitsConfig = null;
+    function unitForSide(side) {
+        return side === 'right' ? 'a2' : (side === 'pivot' ? 'generic' : 'a1');
+    }
+    async function loadAxisLimitsConfig() {
+        try {
+            const res = await fetch('/api/axis-limits');
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            if (data && data.generic && data.a1 && data.a2) axisLimitsConfig = data;
+            console.log('[km] Axis limits loaded:', axisLimitsConfig);
+        } catch (e) {
+            console.warn('[km] Could not load axis limits:', e.message);
+        }
+    }
+    if (typeof io !== 'undefined') {
+        const _kmAxisLimitSocket = io(window.location.origin);
+        _kmAxisLimitSocket.on('axis-limits-updated', (data) => {
+            axisLimitsConfig = data;
+            if (lastCard) renderCard(lastCard);
+        });
+    }
 
     // ── Route tape (real KM chainage) ───────────────────────────────────────────
     // When a route tape has been uploaded via Chainage Preview, /api/chainage-preview
@@ -404,22 +440,34 @@
     // Returns the raw-value P1/P2/P3 min/max band set for a given side —
     // left+right both use the axle band (thresholdsConfig.axle), pivot uses
     // its own (thresholdsConfig.pivot). Same set for both V and L axes,
-    // mirroring server.js's thresholdsFor(sensorId).
+    // mirroring server.js's thresholdsFor(sensorId). Kept around for the
+    // tooltip helper below; no longer drives the P1/P2/P3 counts themselves.
     function getRawPeakThresholds(side) {
         return side === 'pivot' ? thresholdsConfig.pivot : thresholdsConfig.axle;
     }
 
-    // Classifies a raw axis reading into P1/P2/P3 using min/max RANGES
-    // (not single cutoffs) — identical logic to server.js's getPClass():
-    // P3: g >= p3Min · P2: p2Min <= g < p2Max · P1: p1Min <= g < p1Max.
-    // Returns null (unclassified) if thresholds haven't loaded from the
-    // server yet — never falls back to a made-up default.
-    function classifyRawPeak(g, thresholds) {
-        if (g == null || isNaN(g) || !thresholds) return null;
+    // Returns the per-axis { p1, p2, p3 } cutoff set from the Configuration
+    // page's "Axis Limit Values" section (/api/axis-limits) for a given
+    // side + axis letter ('x' = Lateral/L, 'y' = Vertical/V). Null if axis
+    // limits haven't loaded from the server yet.
+    function getAxisLimitBand(side, axisLetter) {
+        if (!axisLimitsConfig) return null;
+        const unit = unitForSide(side);
+        return (axisLimitsConfig[unit] && axisLimitsConfig[unit][axisLetter]) || null;
+    }
+
+    // Classifies a raw axis reading into P1/P2/P3 using the Axis Limit
+    // Values' single g cutoffs (not min/max ranges) — a reading crosses a
+    // band once |value| >= that band's configured value, same semantics as
+    // configuration.js. Reading is bucketed into the highest band it
+    // crosses. Returns null (unclassified) if the band isn't configured yet
+    // — never falls back to a made-up default.
+    function classifyAxisLimitPeak(g, band) {
+        if (g == null || isNaN(g) || !band) return null;
         const v = Math.abs(g);
-        if (v >= +thresholds.p3Min)                                     return 'P3';
-        if (v >= +thresholds.p2Min && v < +thresholds.p2Max)            return 'P2';
-        if (v >= +thresholds.p1Min && v < +thresholds.p1Max)            return 'P1';
+        if (band.p3 != null && v >= +band.p3) return 'P3';
+        if (band.p2 != null && v >= +band.p2) return 'P2';
+        if (band.p1 != null && v >= +band.p1) return 'P1';
         return null;
     }
 
@@ -432,105 +480,80 @@
         };
         for (const d of docs) {
             const side = d.device_id === 'right' ? 'right' : (d.device_id === 'pivot' ? 'pivot' : 'left');
-            const thresholds = getRawPeakThresholds(side);
-            const pV = classifyRawPeak(d.y_axis, thresholds);
-            const pL = classifyRawPeak(d.x_axis, thresholds);
+            // V (vertical) = y_axis, L (lateral) = x_axis — same mapping the
+            // table/CSV always used, now checked against the Axis Limit
+            // Values per-axis cutoffs instead of the axle/pivot range set.
+            const pV = classifyAxisLimitPeak(d.y_axis, getAxisLimitBand(side, 'y'));
+            const pL = classifyAxisLimitPeak(d.x_axis, getAxisLimitBand(side, 'x'));
             if (pV) out[side].V[pV]++;
             if (pL) out[side].L[pL]++;
         }
         return out;
     }
 
-    // Shared key-mapping + per-slice max helper, used by both worst-peaks
-    // strategies below.
-    const WORST_PEAK_KEYS = ['L-LAT', 'L-VERT', 'R-LAT', 'R-VERT', 'P-LAT', 'P-VERT'];
-    function emptyWorstPeaks() { return Object.fromEntries(WORST_PEAK_KEYS.map(k => [k, []])); }
-    function worstPeakKeyFor(d) {
-        const side = d.device_id === 'right' ? 'right' : (d.device_id === 'pivot' ? 'pivot' : 'left');
-        return {
-            lat:  side === 'left' ? 'L-LAT'  : side === 'right' ? 'R-LAT'  : 'P-LAT',
-            vert: side === 'left' ? 'L-VERT' : side === 'right' ? 'R-VERT' : 'P-VERT',
-        };
-    }
-    function worstPeakMaxInSlice(slice) {
-        const cur = Object.fromEntries(WORST_PEAK_KEYS.map(k => [k, null]));
-        for (const d of slice) {
-            const { lat: latKey, vert: vertKey } = worstPeakKeyFor(d);
-            const lat  = d.x_axis != null ? Math.abs(d.x_axis) : null;
-            const vert = d.y_axis != null ? Math.abs(d.y_axis) : null;
-            if (lat  != null) cur[latKey]  = cur[latKey]  == null ? lat  : Math.max(cur[latKey],  lat);
-            if (vert != null) cur[vertKey] = cur[vertKey] == null ? vert : Math.max(cur[vertKey], vert);
-        }
-        return cur;
-    }
+    // Worst peaks = max |raw| per block, kept as a FIFO queue of the last 10.
+    //
+    // Static: each block = 200 consecutive records (RECORDS_PER_BLOCK).
+    // Distance: each block = 200 m of distance_m within this KM.
+    //
+    // Column 1 = oldest retained block max, column 10 = newest.
+    // When an 11th block completes, column 1 is dropped and the new max
+    // is appended (queue shift). Recalculated every poll from kmDocsSlice.
+    function computeWorstPeaks(docs, useDistance, kmStart, blockLengths) {
+        const keys = ['L-LAT', 'L-VERT', 'R-LAT', 'R-VERT', 'P-LAT', 'P-VERT'];
+        const empty = () => Object.fromEntries(keys.map(k => [k, []]));
+        if (!docs || !docs.length) return empty();
 
-    // Worst peaks while STATIC (bench test / no real distance movement):
-    // there's no notion of "completed KMs" yet, so instead take the highest
-    // |raw| reading seen in every successive 1000-record window of the
-    // running session — column 1 = most recent 1000-record window, column 2
-    // = the window before that, etc. This grows a new column every 1000
-    // records as the session accumulates, which is what was asked for.
-    function computeWorstPeaksStatic(docs) {
-        if (!docs || !docs.length) return emptyWorstPeaks();
-        const CHUNK = 1000;
-        const out = emptyWorstPeaks();
-        const windowMaxes = Object.fromEntries(WORST_PEAK_KEYS.map(k => [k, []]));
-        for (let i = 0; i < docs.length; i += CHUNK) {
-            const cur = worstPeakMaxInSlice(docs.slice(i, i + CHUNK));
-            for (const k of WORST_PEAK_KEYS) {
-                if (cur[k] != null) windowMaxes[k].push(+cur[k].toFixed(1));
+        function maxInDocs(slice) {
+            const cur = Object.fromEntries(keys.map(k => [k, null]));
+            for (const d of slice) {
+                const side = d.device_id === 'right' ? 'right' : (d.device_id === 'pivot' ? 'pivot' : 'left');
+                const latKey  = side === 'left' ? 'L-LAT'  : side === 'right' ? 'R-LAT'  : 'P-LAT';
+                const vertKey = side === 'left' ? 'L-VERT' : side === 'right' ? 'R-VERT' : 'P-VERT';
+                const lat  = d.x_axis != null ? Math.abs(d.x_axis) : null;
+                const vert = d.y_axis != null ? Math.abs(d.y_axis) : null;
+                if (lat  != null) cur[latKey]  = cur[latKey]  == null ? lat  : Math.max(cur[latKey],  lat);
+                if (vert != null) cur[vertKey] = cur[vertKey] == null ? vert : Math.max(cur[vertKey], vert);
+            }
+            return cur;
+        }
+
+        // Build ordered list of block slices (oldest → newest).
+        let slices = [];
+        if (useDistance && kmStart != null && blockLengths && blockLengths.length) {
+            let blockStart = kmStart;
+            for (const len of blockLengths) {
+                const blockEnd = blockStart + len;
+                const slice = docs.filter(d =>
+                    d.distance_m != null && d.distance_m >= blockStart && d.distance_m < blockEnd
+                );
+                if (slice.length) slices.push(slice);
+                blockStart = blockEnd;
+            }
+            // Any docs past the last defined block (shouldn't happen often)
+            // are ignored — tape length owns the KM.
+        } else {
+            // Static: fixed 200-record windows, chronological.
+            const CHUNK = 100;
+            for (let i = 0; i < docs.length; i += CHUNK) {
+                const slice = docs.slice(i, i + CHUNK);
+                if (slice.length) slices.push(slice);
             }
         }
-        for (const k of WORST_PEAK_KEYS) {
-            // reverse so column 1 = most recent 1000-record max
-            out[k] = windowMaxes[k].reverse().slice(0, 10);
-        }
-        return out;
-    }
 
-    // Worst peaks while IN MOTION (real distance_m data): one column per
-    // COMPLETED km, most recently completed first, up to 10 columns — each
-    // column is the single highest |raw| reading recorded anywhere inside
-    // that km (left/right/pivot × lat/vert, tracked independently). The
-    // currently in-progress km (kmIdx) is included as column 1 with its
-    // running max so far; kmIdx-1, kmIdx-2, … fill the remaining columns as
-    // already-completed kms.
-    function computeWorstPeaksByKm(sessionDocs, kmIdx) {
-        const out = emptyWorstPeaks();
-        if (!routeTapeData || !routeTapeKmNums.length) return out;
-        const idxList = [];
-        for (let idx = kmIdx; idx >= 0 && idxList.length < 10; idx--) idxList.push(idx);
-
-        for (const idx of idxList) {
-            if (idx < 0 || idx >= routeTapeKmNums.length) continue;
-            const km = routeTapeKmNums[idx];
-            const kmStart = cumulativeDistanceStart(idx);
-            const kmEnd = kmStart + routeTapeData.kmLengths[km];
-            const slice = sessionDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
-            const cur = worstPeakMaxInSlice(slice);
-            for (const k of WORST_PEAK_KEYS) {
-                out[k].push(cur[k] != null ? +cur[k].toFixed(1) : null);
+        // Max per block, then keep only the last 10 (FIFO queue).
+        const series = Object.fromEntries(keys.map(k => [k, []]));
+        for (const slice of slices) {
+            const cur = maxInDocs(slice);
+            for (const k of keys) {
+                if (cur[k] != null) series[k].push(+cur[k].toFixed(1));
             }
         }
-        // Trim fully-empty trailing columns so short sessions don't render
-        // a wall of dashes past the last km that actually has any data.
-        for (const k of WORST_PEAK_KEYS) {
-            while (out[k].length && out[k][out[k].length - 1] == null) out[k].pop();
-        }
-        return out;
-    }
 
-    // Legacy single-call wrapper kept for buildRouteTapeCard()/CSV export,
-    // which only ever have one km's docs in hand at a time (no access to
-    // "completed kms" history) — static path is unchanged; dynamic path
-    // falls back to a single running-max column for that one km's own docs.
-    function computeWorstPeaks(docs, useDistance) {
-        if (!docs || !docs.length) return emptyWorstPeaks();
-        if (!useDistance) return computeWorstPeaksStatic(docs);
-        const cur = worstPeakMaxInSlice(docs);
-        const out = emptyWorstPeaks();
-        for (const k of WORST_PEAK_KEYS) {
-            if (cur[k] != null) out[k] = [+cur[k].toFixed(1)];
+        const out = empty();
+        for (const k of keys) {
+            // last 10 only — drop oldest when longer than 10
+            out[k] = series[k].slice(-10);
         }
         return out;
     }
@@ -585,41 +608,47 @@
         const l = peakDist.left, r = peakDist.right, p = peakDist.pivot || { V:{}, L:{} };
 
         // Show which thresholds are driving the classification — pulled live
-        // from the Configuration page (axle: /api/thresholds, pivot: /api/thresholds/pivot).
-        // If either hasn't loaded yet (server unreachable, or no config saved
-        // yet), say so plainly instead of inventing a number.
-        const axleT = thresholdsConfig.axle, pivotT = thresholdsConfig.pivot;
-        const rangeStr = t => `P1 ${t.p1Min}–${t.p1Max}g &nbsp;·&nbsp; P2 ${t.p2Min}–${t.p2Max}g &nbsp;·&nbsp; P3 ≥ ${t.p3Min}g`;
-        const thresholdNote = (axleT && pivotT)
+        // from the Configuration page's "Axis Limit Values" section
+        // (/api/axis-limits: a1=Left, a2=Right, generic=Pivot). If it hasn't
+        // loaded yet (server unreachable, or nothing saved yet), say so
+        // plainly instead of inventing a number.
+        const bandStr = (side) => {
+            const bx = getAxisLimitBand(side, 'x'), by = getAxisLimitBand(side, 'y');
+            if (!bx || !by) return null;
+            return `V: P1 ${by.p1 ?? '—'}g · P2 ${by.p2 ?? '—'}g · P3 ${by.p3 ?? '—'}g` +
+                   ` &nbsp;|&nbsp; L: P1 ${bx.p1 ?? '—'}g · P2 ${bx.p2 ?? '—'}g · P3 ${bx.p3 ?? '—'}g`;
+        };
+        const leftStr = bandStr('left'), rightStr = bandStr('right'), pivotStr = bandStr('pivot');
+        const thresholdNote = (leftStr && rightStr && pivotStr)
             ? `<div style="font-size:10px;color:#64748b;margin-bottom:6px;font-style:italic;">
-                Using Configuration thresholds — Axle (L/R): ${rangeStr(axleT)}
-                <br>Pivot: ${rangeStr(pivotT)}
+                Using Axis Limit Values — Left: ${leftStr}
+                <br>Right: ${rightStr}
+                <br>Pivot: ${pivotStr}
                 <a href="configuration.html" style="color:#64748b;">Configure →</a>
             </div>`
             : `<div style="font-size:10px;color:#c2410c;margin-bottom:6px;font-style:italic;">
-                ⚠ Thresholds not loaded from Configuration yet — counts below may be blank.
+                ⚠ Axis Limit Values not loaded from Configuration yet — counts below may be blank.
                 <a href="configuration.html" style="color:#c2410c;">Configure →</a>
             </div>`;
 
-        const bandTip = (side, band) => {
-            const t = getRawPeakThresholds(side);
-            if (!t) return 'Not configured yet';
-            if (band === 'P1') return `P1: ${t.p1Min}g – ${t.p1Max}g`;
-            if (band === 'P2') return `P2: ${t.p2Min}g – ${t.p2Max}g`;
-            return `P3: ≥ ${t.p3Min}g`;
+        const bandTip = (side, axisCol, band) => {
+            const axisLetter = axisCol === 'V' ? 'y' : 'x';
+            const b = getAxisLimitBand(side, axisLetter);
+            if (!b) return 'Not configured yet';
+            const v = b[band.toLowerCase()];
+            return v != null ? `${band}: ≥ ${v}g` : `${band}: not set`;
         };
 
         const bandRow = band => {
             const cls = band.toLowerCase();
-            const tip = (side, axis) => bandTip(side, band);
             return `<tr>
                 <td><span class="badge badge-${cls}">${band}</span></td>
-                <td class="count-badge count-${cls}" title="${tip('left','V')}">${l.V[band]||0}</td>
-                <td class="count-badge count-${cls}" title="${tip('left','L')}">${l.L[band]||0}</td>
-                <td class="count-badge count-${cls}" title="${tip('right','V')}">${r.V[band]||0}</td>
-                <td class="count-badge count-${cls}" title="${tip('right','L')}">${r.L[band]||0}</td>
-                <td class="count-badge count-${cls}" title="${tip('pivot','V')}">${p.V[band]||0}</td>
-                <td class="count-badge count-${cls}" title="${tip('pivot','L')}">${p.L[band]||0}</td>
+                <td class="count-badge count-${cls}" title="${bandTip('left','V',band)}">${l.V[band]||0}</td>
+                <td class="count-badge count-${cls}" title="${bandTip('left','L',band)}">${l.L[band]||0}</td>
+                <td class="count-badge count-${cls}" title="${bandTip('right','V',band)}">${r.V[band]||0}</td>
+                <td class="count-badge count-${cls}" title="${bandTip('right','L',band)}">${r.L[band]||0}</td>
+                <td class="count-badge count-${cls}" title="${bandTip('pivot','V',band)}">${p.V[band]||0}</td>
+                <td class="count-badge count-${cls}" title="${bandTip('pivot','L',band)}">${p.L[band]||0}</td>
             </tr>`;
         };
         return `<div class="table-container">
@@ -632,45 +661,48 @@
         </div>`;
     }
 
-    function renderWorstPeaksTable(worstPeaks, distanceBased) {
+    function renderWorstPeaksTable(worstPeaks, meta) {
         if (!worstPeaks) return '<p class="no-data">No peak data yet.</p>';
-
-        const params = ['L-LAT', 'L-VERT', 'R-LAT', 'R-VERT', 'P-LAT', 'P-VERT'];
-
-        const modeNote = distanceBased
-            ? `<div style="font-size:10px;color:#64748b;margin-bottom:6px;font-style:italic;">
-                In motion — each column is the worst reading from one completed KM (1 = current/most recent, going back).
-            </div>`
-            : `<div style="font-size:10px;color:#64748b;margin-bottom:6px;font-style:italic;">
-                Stationary — each column is the worst reading from a 1,000-record window (1 = most recent).
-            </div>`;
-
+        const params = ['L-LAT','L-VERT','R-LAT','R-VERT','P-LAT','P-VERT'];
+        const header = `<tr><th>Parameter</th>${[1,2,3,4,5,6,7,8,9,10].map(i=>`<th>${i}</th>`).join('')}</tr>`;
         const rows = params.map(param => {
             const vals = worstPeaks[param] || [];
             const cells = Array.from({length: 10}, (_, i) => {
                 const v = vals[i];
-                return v == null 
-                    ? `<td class="peak-meter">—</td>` 
-                    : `<td class="peak-meter ${peakClass(v)}">${fmt(v, 1)}</td>`;
+                return `<td class="${v != null ? peakClass(v) : ''}">${v != null ? v : '—'}</td>`;
             }).join('');
-
-            return `<tr>
-                <td><strong>${param}</strong></td>
-                ${cells}
-            </tr>`;
+            return `<tr><td>${param}</td>${cells}</tr>`;
         }).join('');
 
-        return `
-        <div class="table-container worst-peaks-table">
-            ${modeNote}
+        // Progress note: how many records went into this table, and distance
+        // span when available (xxx m / Y m of this KM).
+        let progressNote = '';
+        if (meta) {
+            const n = meta.recordsSoFar != null ? meta.recordsSoFar : null;
+            const windows = n != null ? Math.ceil(n / 1000) : null;
+            if (meta.distanceBased && meta.kmLengthM != null) {
+                const covered = meta.distanceCoveredM != null ? Math.round(meta.distanceCoveredM) : null;
+                const total = Math.round(meta.kmLengthM);
+                const distPart = covered != null
+                    ? `${covered} m / ${total} m`
+                    : `${total} m KM`;
+                progressNote = `<div style="font-size:10px;color:#64748b;margin-bottom:6px;font-style:italic;">
+                    Worst peak per 200&nbsp;m block (col 1 = oldest, last col = newest; queue of 10)
+                    ${n != null ? `· ${n} records` : ''}
+                    · ${distPart}
+                </div>`;
+            } else {
+                progressNote = `<div style="font-size:10px;color:#64748b;margin-bottom:6px;font-style:italic;">
+                    Worst peak per 200-record block (col 1 = oldest, last col = newest; queue of 10)
+                    ${n != null ? `· ${n} records` : ''}
+                </div>`;
+            }
+        }
+
+        return `<div class="table-container">
+            ${progressNote}
             <table>
-                <thead>
-                    <tr>
-                        <th>Parameter</th>
-                        <th>1</th><th>2</th><th>3</th><th>4</th><th>5</th>
-                        <th>6</th><th>7</th><th>8</th><th>9</th><th>10</th>
-                    </tr>
-                </thead>
+                <thead>${header}</thead>
                 <tbody>${rows}</tbody>
             </table>
         </div>`;
@@ -688,14 +720,11 @@
         if (data.historical) {
             badge = `<span class="historical-badge"><i class="fas fa-history"></i> Last Session</span>`;
         } else if (data.isPartial && isLive) {
-            badge = `<span class="live-badge"><i class="fas fa-circle blink"></i> LIVE</span>`;
+            const progressLabel = data.distanceBased
+                ? `${data.recordsSoFar} pts`
+                : `${data.recordsSoFar}/${data.recordsExpected}`;
+            badge = `<span class="live-badge"><i class="fas fa-circle blink"></i> LIVE &nbsp;<span style="font-size:11px">${progressLabel}</span></span>`;
         }
-
-        // Records-recorded count — always shown for this KM, not just while
-        // it's still partial/live, so it never silently disappears.
-        const recordsLabel = data.distanceBased
-            ? `${data.recordsSoFar} pts`
-            : (data.recordsExpected ? `${data.recordsSoFar}/${data.recordsExpected} pts` : `${data.recordsSoFar} pts`);
 
         container.innerHTML = `
         <div class="km-block${data.isPartial && isLive ? ' km-live' : ''}">
@@ -703,7 +732,6 @@
                 <div class="km-header-left">
                     <span><i class="fas fa-map-pin"></i> Km From: ${data.kmFrom}</span>
                     <span><i class="fas fa-map-pin"></i> Km To: ${data.kmTo}</span>
-                    <span class="records-count-badge"><i class="fas fa-database"></i> ${recordsLabel}</span>
                     ${badge}
                 </div>
                 <div class="km-header-right">
@@ -720,7 +748,7 @@
             </div>
             <div class="section" style="display:${wD}">
                 <div class="section-title"><i class="fas fa-chart-line"></i> Worst Peaks</div>
-                ${renderWorstPeaksTable(data.worstPeaks, data.distanceBased)}
+                ${renderWorstPeaksTable(data.worstPeaks, data)}
             </div>
         </div>`;
     }
@@ -818,6 +846,7 @@
         // distribution in sync with the Configuration page)
         await loadLimitsConfig();
         await loadThresholdsConfig();
+        await loadAxisLimitsConfig();
         // 0b. Fetch route tape data (Chainage Preview upload) — this is the ONLY
         // source of KM boundaries now. No route tape → no guessed fallback →
         // report shows a prompt instead of building anything.
@@ -881,7 +910,6 @@
                         const kmDocsSlice = sessionDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
                         const card = buildRouteTapeCard(kmDocsSlice, km, kmStart, true);
                         card.historical = false;
-                        card.worstPeaks = computeWorstPeaksByKm(sessionDocs, kmIdx);
                         setStatus(hwLive);
                         setToolbarCount(kmIdx);
                         lastCard = card;
@@ -896,7 +924,6 @@
                         const card = buildRouteTapeCard(lastKmDocs, lastKm, kmStart, false);
                         card.historical = false;
                         card.routeTapeExhausted = true;
-                        card.worstPeaks = computeWorstPeaksByKm(sessionDocs, lastIdx);
                         setStatus(hwLive);
                         setToolbarCount(routeTapeKmNums.length);
                         lastCard = card;
@@ -937,7 +964,6 @@
                         const lastKmDocs = sessionDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
                         const card = buildRouteTapeCard(lastKmDocs, lastKm, kmStart, false);
                         card.historical = false;
-                        card.worstPeaks = computeWorstPeaksByKm(sessionDocs, lastIdx);
                         setStatus(hwLive);
                         setToolbarCount(completedIdx);
                         lastCard = card;
@@ -947,7 +973,6 @@
                         const kmDocsSlice = sessionDocs.filter(d => d.distance_m != null && d.distance_m < routeTapeData.kmLengths[firstKm]);
                         const card = buildRouteTapeCard(kmDocsSlice, firstKm, 0, false);
                         card.historical = false;
-                        card.worstPeaks = computeWorstPeaksByKm(sessionDocs, 0);
                         setStatus(hwLive);
                         setToolbarCount(0);
                         lastCard = card;
@@ -1000,7 +1025,6 @@
                 const lastKmDocs = prevDayDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
                 const card = buildRouteTapeCard(lastKmDocs, lastKm, kmStart, false);
                 card.historical = true;
-                card.worstPeaks = computeWorstPeaksByKm(prevDayDocs, lastIdx);
                 setStatus(hwLive);
                 setToolbarCount(completedIdxPrev);
                 lastCard = card;
@@ -1010,7 +1034,6 @@
                 const kmDocsSlice = prevDayDocs.filter(d => d.distance_m != null && d.distance_m < routeTapeData.kmLengths[firstKm]);
                 const card = buildRouteTapeCard(kmDocsSlice, firstKm, 0, false);
                 card.historical = true;
-                card.worstPeaks = computeWorstPeaksByKm(prevDayDocs, 0);
                 setStatus(hwLive);
                 setToolbarCount(0);
                 lastCard = card;
@@ -1187,6 +1210,18 @@
 
             // PEAK DISTRIBUTION
             rows.push("PEAK DISTRIBUTION");
+            // Axis Limit Values driving the counts below (Configuration page,
+            // /api/axis-limits: a1=Left, a2=Right, generic=Pivot). Printed so
+            // the report is self-documenting about which cutoffs were active
+            // when this KM was recorded.
+            const axisLimitNote = side => {
+                const bx = getAxisLimitBand(side, 'x'), by = getAxisLimitBand(side, 'y');
+                if (!bx || !by) return 'not configured';
+                return `V P1=${by.p1 ?? '—'}g P2=${by.p2 ?? '—'}g P3=${by.p3 ?? '—'}g | L P1=${bx.p1 ?? '—'}g P2=${bx.p2 ?? '—'}g P3=${bx.p3 ?? '—'}g`;
+            };
+            rows.push(`Axis Limit Values,Left: ${axisLimitNote('left')}`);
+            rows.push(`,Right: ${axisLimitNote('right')}`);
+            rows.push(`,Pivot: ${axisLimitNote('pivot')}`);
             rows.push("Band,Left Vertical (V),Left Lateral (L),Right Vertical (V),Right Lateral (L),Pivot Vertical (V),Pivot Lateral (L)");
 
             const pd = card.peakDist || { left: { V: {}, L: {} }, right: { V: {}, L: {} }, pivot: { V: {}, L: {} } };

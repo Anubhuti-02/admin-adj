@@ -1,22 +1,26 @@
 /* configuration.js
  * Axle thresholds   → /api/thresholds        (unchanged shape, other pages still work)
  * Pivot thresholds  → /api/thresholds/pivot  (pivot classified separately)
- * Axis limits (X/Y/Z) — one g-value per axis per unit (generic/a1/a2), server-
- * backed via /api/axis-limits. Same semantics as the threshold endpoints:
- * a reading whose |value| >= the configured number crosses the limit.
- * Saving one unit's X/Y/Z sends 3 POSTs (one per axis); Reset deletes every
- * saved value and the server falls back to its 0.5g default.
+ * Axis limits (X/Y/Z) — P1/P2/P3 g-band values per axis per unit (generic/a1/a2),
+ * server-backed via /api/axis-limits. Same semantics as the threshold endpoints:
+ * a reading whose |value| >= the configured band value crosses that band.
+ * Saving one unit's X/Y/Z sends one POST per axis/band combo that has a value
+ * entered; Reset deletes every saved value and the server falls back to its
+ * 2g default for every band.
  */
 
 const AXES = ['x', 'y', 'z'];
+const BANDS = ['p1', 'p2', 'p3'];
 const AXIS_UNIT_PREFIX = { generic: 'Gen', a1: 'A1', a2: 'A2' };
 
-// axisLimitsData mirrors the server shape exactly: { generic:{x,y,z}, a1:{x,y,z}, a2:{x,y,z} }
-// — each leaf is a single number (or null if somehow unset).
+// axisLimitsData mirrors the server shape exactly:
+// { generic:{x:{p1,p2,p3}, y:{...}, z:{...}}, a1:{...}, a2:{...} }
+// — each band leaf is a single number (or null if somehow unset).
+function emptyBand() { return { p1: null, p2: null, p3: null }; }
 let axisLimitsData = {
-    generic: { x: null, y: null, z: null },
-    a1:      { x: null, y: null, z: null },
-    a2:      { x: null, y: null, z: null }
+    generic: { x: emptyBand(), y: emptyBand(), z: emptyBand() },
+    a1:      { x: emptyBand(), y: emptyBand(), z: emptyBand() },
+    a2:      { x: emptyBand(), y: emptyBand(), z: emptyBand() }
 };
 
 async function fetchAxisLimits() {
@@ -124,45 +128,57 @@ function displayCurrentConfig(t, badgesElId) {
     ` : `<div class="config-badge-item" style="color:#94a3b8;">No thresholds configured yet — enter values and save.</div>`;
 }
 
-// ── Single-value Axis Limits — one number per axis per unit ────────────────
-// Populates the X/Y/Z inputs + "Current: —" labels for one unit from
+// ── Axis Limits — P1/P2/P3 g-bands per axis per unit ────────────────────────
+// Populates the X/Y/Z P1/P2/P3 inputs + "Current" labels for one unit from
 // axisLimitsData (called on load and whenever the server pushes an update).
 function displayAxisLimitUnit(unit) {
     const prefix = AXIS_UNIT_PREFIX[unit];
     AXES.forEach(axis => {
-        const input   = document.getElementById(`axisLimit${prefix}${axis.toUpperCase()}`);
+        const axisData = (axisLimitsData[unit] && axisLimitsData[unit][axis]) || {};
+        BANDS.forEach(band => {
+            const input = document.getElementById(`axisLimit${prefix}${axis.toUpperCase()}${band.toUpperCase()}`);
+            const v = axisData[band];
+            if (input && document.activeElement !== input) input.value = v ?? '';
+        });
         const current = document.getElementById(`axisLimit${prefix}${axis.toUpperCase()}Current`);
-        const v = axisLimitsData[unit] && axisLimitsData[unit][axis];
-        if (input && document.activeElement !== input) input.value = v ?? '';
         if (current) {
-            if (v != null) { current.textContent = `Current: ${v}g`; current.classList.add('set'); }
-            else            { current.textContent = 'Current: —';     current.classList.remove('set'); }
+            const parts = BANDS.filter(b => axisData[b] != null).map(b => `${b.toUpperCase()}:${axisData[b]}g`);
+            if (parts.length) { current.textContent = `Current: ${parts.join(' · ')}`; current.classList.add('set'); }
+            else               { current.textContent = 'Current: —'; current.classList.remove('set'); }
         }
     });
 }
 
-// Reads the three X/Y/Z inputs for one unit and POSTs each axis that has a
-// valid positive value. Mirrors /api/thresholds's "one object per Save
-// click" pattern rather than the old per-keystroke Add/Remove.
+// Reads the P1/P2/P3 inputs for all three axes of one unit and POSTs each
+// axis/band combo that has a valid positive value entered. Mirrors
+// /api/thresholds's "one object per Save click" pattern rather than the old
+// per-keystroke Add/Remove. Bands left blank simply keep their previously
+// saved value — save is never blocked by missing/null fields, only by an
+// explicitly-entered invalid one (e.g. negative or non-numeric).
 async function saveAxisLimit(unit) {
     const prefix = AXIS_UNIT_PREFIX[unit];
-    const values = {};
+    const updates = []; // { axis, band, value }
+
     for (const axis of AXES) {
-        const input = document.getElementById(`axisLimit${prefix}${axis.toUpperCase()}`);
-        const raw   = input ? input.value.trim() : '';
-        if (raw === '') continue; // leave that axis's saved value untouched
-        const v = parseFloat(raw);
-        if (isNaN(v) || v <= 0) { showError(`Enter a valid positive ${axis.toUpperCase()}-axis limit`); return; }
-        values[axis] = v;
+        for (const band of BANDS) {
+            const input = document.getElementById(`axisLimit${prefix}${axis.toUpperCase()}${band.toUpperCase()}`);
+            const raw   = input ? input.value.trim() : '';
+            if (raw === '') continue; // leave that band's saved value untouched — not an error
+            const v = parseFloat(raw);
+            if (isNaN(v) || v <= 0) { showError(`Enter a valid positive ${axis.toUpperCase()}-axis ${band.toUpperCase()} value`); return; }
+            updates.push({ axis, band, value: v });
+        }
     }
-    if (!Object.keys(values).length) { showError('Enter at least one axis value to save'); return; }
+
+    // Nothing entered this click — not an error, just nothing to do.
+    if (!updates.length) { hideError(); return; }
 
     try {
-        for (const [axis, value] of Object.entries(values)) {
+        for (const { axis, band, value } of updates) {
             const res  = await fetch('/api/axis-limits', {
                 method:  'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body:    JSON.stringify({ unit, axis, value })
+                body:    JSON.stringify({ unit, axis, band, value })
             });
             const data = await res.json();
             if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
@@ -233,7 +249,7 @@ async function saveAllConfig() {
 }
 
 // ── Clear — resets thresholds AND deletes every saved axis-limit value,
-// falling the latter back to the server's 0.5g default. ────────────────────
+// falling the latter back to the server's 2g default for every band. ──────
 async function resetToDefault() {
     try {
         const res = await fetch('/api/thresholds', { method: 'DELETE' });
@@ -257,7 +273,7 @@ async function resetToDefault() {
         ['p1Min','p1Max','p2Min','p2Max','p3Min'].forEach(id => { document.getElementById(id).value = ''; });
         setInputs('pv-', pvData.thresholds);
 
-        // Deletes every user-saved axis limit — server resets each axis to 0.5g
+        // Deletes every user-saved axis limit — server resets each band to 2g
         const axRes = await fetch('/api/axis-limits', { method: 'DELETE' });
         if (!axRes.ok) throw new Error(`HTTP ${axRes.status} on /api/axis-limits`);
         const axData = await axRes.json();

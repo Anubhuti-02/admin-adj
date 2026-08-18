@@ -138,13 +138,33 @@ const AXIS_LIMITS_FILE = path.join(__dirname, 'axis_limits.json');
 // (467,923 entries / 11.4MB before the PEAKS_LOG_MAX_ENTRIES cap above) and
 // eventually OOM-crashing the process during JSON.stringify().
 const DEFAULT_AXIS_LIMIT = 2;
+const AXIS_LIMIT_BANDS = ['p1', 'p2', 'p3'];
+
+function defaultAxisBand() {
+    return { p1: DEFAULT_AXIS_LIMIT, p2: DEFAULT_AXIS_LIMIT, p3: DEFAULT_AXIS_LIMIT };
+}
 
 function defaultAxisLimitsShape() {
     return {
-        generic: { x: DEFAULT_AXIS_LIMIT, y: DEFAULT_AXIS_LIMIT, z: DEFAULT_AXIS_LIMIT },
-        a1:      { x: DEFAULT_AXIS_LIMIT, y: DEFAULT_AXIS_LIMIT, z: DEFAULT_AXIS_LIMIT },
-        a2:      { x: DEFAULT_AXIS_LIMIT, y: DEFAULT_AXIS_LIMIT, z: DEFAULT_AXIS_LIMIT },
+        generic: { x: defaultAxisBand(), y: defaultAxisBand(), z: defaultAxisBand() },
+        a1:      { x: defaultAxisBand(), y: defaultAxisBand(), z: defaultAxisBand() },
+        a2:      { x: defaultAxisBand(), y: defaultAxisBand(), z: defaultAxisBand() },
     };
+}
+
+// Coerces one saved axis leaf into { p1, p2, p3 }. Handles the pre-band
+// shape (a bare number) transparently by seeding all three bands with it,
+// so existing axis_limits.json files from before this change still load.
+function coerceAxisBand(saved, fallback) {
+    if (saved != null && typeof saved === 'object') {
+        return {
+            p1: typeof saved.p1 === 'number' ? saved.p1 : fallback.p1,
+            p2: typeof saved.p2 === 'number' ? saved.p2 : fallback.p2,
+            p3: typeof saved.p3 === 'number' ? saved.p3 : fallback.p3,
+        };
+    }
+    if (typeof saved === 'number') return { p1: saved, p2: saved, p3: saved };
+    return fallback;
 }
 
 function loadAxisLimits() {
@@ -153,11 +173,17 @@ function loadAxisLimits() {
             const saved = JSON.parse(fs.readFileSync(AXIS_LIMITS_FILE, 'utf8'));
             // merge onto defaults so missing keys (e.g. after upgrade) don't break the UI
             const defaults = defaultAxisLimitsShape();
-            return {
-                generic: { ...defaults.generic, ...(saved.generic || {}) },
-                a1:      { ...defaults.a1,      ...(saved.a1      || {}) },
-                a2:      { ...defaults.a2,      ...(saved.a2      || {}) },
-            };
+            const out = {};
+            for (const unit of ['generic', 'a1', 'a2']) {
+                out[unit] = {};
+                for (const axis of ['x', 'y', 'z']) {
+                    out[unit][axis] = coerceAxisBand(
+                        saved[unit] && saved[unit][axis],
+                        defaults[unit][axis]
+                    );
+                }
+            }
+            return out;
         }
     } catch (e) { console.error('axis_limits.json read error:', e.message); }
     return defaultAxisLimitsShape();
@@ -199,10 +225,33 @@ const FALLBACK_IMPACT_DETECTION_THRESHOLD_G = 2;
 //     return all.length ? Math.min(...all) : FALLBACK_IMPACT_DETECTION_THRESHOLD_G;
 // }
 
+// RESTORED — this was left commented out while still being called live at
+// three call sites below (processRawAccelReading paths), which threw
+// "impactDetectionThreshold is not defined" on every packet and silently
+// broke ingestion (no DB writes, no socket emits, dashboards read as
+// offline/stale even though the TCP/socket connection itself was fine).
+//
+// Adapted for the P1/P2/P3 axis-limit bands: each axis leaf in
+// axisLimitsConfig is now { p1, p2, p3 } instead of a single number, so
+// Object.values(...) per unit yields band objects, not numbers. flattenBands()
+// pulls the individual p1/p2/p3 numbers out of each axis before filtering,
+// preserving the original "take the lowest configured floor across
+// everything" behavior.
+function flattenAxisLimitUnit(unitCfg) {
+    const out = [];
+    for (const axisBands of Object.values(unitCfg || {})) {
+        if (axisBands && typeof axisBands === 'object') out.push(...Object.values(axisBands));
+        else out.push(axisBands); // tolerate any pre-band numeric leftovers
+    }
+    return out;
+}
+
 function impactDetectionThreshold() {
-    const floors = [pClassThresholds?.p1Min, pivotClassThresholds?.p1Min]
-        .filter(v => typeof v === 'number' && !isNaN(v) && v > 0);
-    return floors.length ? Math.min(...floors) : FALLBACK_IMPACT_DETECTION_THRESHOLD_G;
+    const all = [
+        pClassThresholds?.p1Min,
+        pivotClassThresholds?.p1Min,
+    ].filter(v => typeof v === 'number' && !isNaN(v) && v > 0);
+    return all.length ? Math.min(...all) : FALLBACK_IMPACT_DETECTION_THRESHOLD_G;
 }
 
 function getLocalIP() {
@@ -857,25 +906,28 @@ app.delete('/api/thresholds/axis', (req, res) => {
     res.json({ success: true, thresholds: axisThresholds });
 });
 
-// GET full config — { generic: {x,y,z}, a1: {x,y,z}, a2: {x,y,z} }, each value a single number
+// GET full config — { generic: {x,y,z}, a1: {x,y,z}, a2: {x,y,z} }, each
+// axis leaf is now { p1, p2, p3 } (was a single number pre-band).
 app.get('/api/axis-limits', (req, res) => res.json(axisLimitsConfig));
 
-// POST { unit: 'generic'|'a1'|'a2', axis: 'x'|'y'|'z', value: number }
-// Sets exactly one axis's threshold, same "any reading >= value crosses the
+// POST { unit: 'generic'|'a1'|'a2', axis: 'x'|'y'|'z', band: 'p1'|'p2'|'p3', value: number }
+// Sets exactly one axis's one band, same "any reading >= value crosses the
 // limit" semantics as /api/thresholds — no list, no tags.
 app.post('/api/axis-limits', (req, res) => {
-    const { unit, axis, value } = req.body || {};
+    const { unit, axis, band, value } = req.body || {};
     if (!['generic', 'a1', 'a2'].includes(unit))
         return res.status(400).json({ error: `Invalid unit '${unit}'` });
     if (!['x', 'y', 'z'].includes(axis))
         return res.status(400).json({ error: `Invalid axis '${axis}'` });
+    if (!AXIS_LIMIT_BANDS.includes(band))
+        return res.status(400).json({ error: `Invalid band '${band}'` });
     const v = Number(value);
     if (value == null || isNaN(v) || v <= 0)
         return res.status(400).json({ error: 'value must be a positive number' });
 
-    axisLimitsConfig[unit][axis] = v;
+    axisLimitsConfig[unit][axis][band] = v;
     saveAxisLimitsToFile(axisLimitsConfig);
-    console.log(`[axis-limits] Updated ${unit}.${axis}:`, v);
+    console.log(`[axis-limits] Updated ${unit}.${axis}.${band}:`, v);
     io.emit('axis-limits-updated', axisLimitsConfig);
     res.json({ success: true, axisLimits: axisLimitsConfig });
 });
@@ -885,7 +937,7 @@ app.post('/api/axis-limits', (req, res) => {
 app.delete('/api/axis-limits', (req, res) => {
     axisLimitsConfig = defaultAxisLimitsShape();
     saveAxisLimitsToFile(axisLimitsConfig);
-    console.log('[axis-limits] Reset to default (2g):', axisLimitsConfig);
+    console.log('[axis-limits] Reset to default (2g all bands):', axisLimitsConfig);
     io.emit('axis-limits-updated', axisLimitsConfig);
     res.json({ success: true, axisLimits: axisLimitsConfig });
 });
@@ -923,8 +975,9 @@ app.post('/api/notify-emails', async (req, res) => {
 
 // ── Last health status ───────────────────────────────────────────────────
 let lastHealthStatus = null;
-
 let totalDistanceM = 0;
+let speedDistanceM = 0;
+let lastSpeedFixAt = null; // Date.now() of the most recent GPS fix — drives the 'speed' health key
 let lastGpsCoord   = null;
 let lastGpsFixAt   = 0; // Date.now() of the most recent GPS fix — drives the 'gps' health key
 
@@ -971,6 +1024,7 @@ async function computeStats(hours = 24) {
                 lastPeakTimestamp: lastDoc ? lastDoc.timestamp : null,
                 lastPeakSensor:    lastDoc ? lastDoc.sensor    : null,
                 totalDistanceM,
+                speedDistanceM,
                 source: 'postgres'
             };
             console.log(`[stats] PG: ${stats.total} impacts, lastPeak=${stats.lastPeak}g (${stats.lastPeakClass})`);
@@ -1216,7 +1270,7 @@ app.get('/api/historical/graph/:hours', async (req, res) => {
             if (idx !== -1) buckets[sec][`accel${idx + 1}`] = doc.x_axis || 0;
         });
 
-        // res.json(Object.values(buckets).sort((a, b) => a.timestamp.localeCompare(b.timestamp)));
+        res.json(Object.values(buckets).sort((a, b) => a.timestamp.localeCompare(b.timestamp)));
     } catch (e) {
         console.error('/api/historical/graph error:', e);
         res.status(500).json({ error: e.message });
@@ -2105,10 +2159,15 @@ function processGpsFix(lat, lng, speedKmh) {
     }
     lastGpsCoord = { lat, lng, speedKmh };
     lastGpsFixAt = Date.now();
-    io.emit('gps-data', { lat, lng, speedKmh, totalDistanceM, timestamp });
+    if (lastSpeedFixAt) {
+    const dtSec = (lastGpsFixAt - lastSpeedFixAt) / 1000;
+    speedDistanceM += (speedKmh / 3.6) * dtSec;   // km/h → m/s, × elapsed seconds
+    }
+    lastSpeedFixAt = lastGpsFixAt;
+    io.emit('gps-data', { lat, lng, speedKmh, totalDistanceM, speedDistanceM ,timestamp });
     if (pgReady) {
-        pool.query('INSERT INTO rm_gps (timestamp, lat, lng, speed_kmh, total_distance_m) VALUES ($1,$2,$3,$4,$5)',
-            [timestamp, lat, lng, speedKmh, totalDistanceM]).catch(e => console.error('[GPS-TCP] db insert:', e.message));
+        pool.query('INSERT INTO rm_gps (timestamp, lat, lng, speed_kmh, total_distance_m, speed_distance_m) VALUES ($1,$2,$3,$4,$5,$6)',
+            [timestamp, lat, lng, speedKmh, totalDistanceM, speedDistanceM]).catch(e => console.error('[GPS-TCP] db insert:', e.message));
     }
     console.log(`[GPS-TCP] lat=${lat.toFixed(6)} lng=${lng.toFixed(6)} spd=${speedKmh.toFixed(2)}km/h dist=${(totalDistanceM/1000).toFixed(3)}km`);
 }

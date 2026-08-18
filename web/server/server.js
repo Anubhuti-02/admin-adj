@@ -187,15 +187,22 @@ const FALLBACK_IMPACT_DETECTION_THRESHOLD_G = 2;
 // labeled afterward. pClassThresholds/pivotClassThresholds are declared
 // further down this file but that's fine — this function's body only runs
 // when called, well after module-load finishes.
+
+// function impactDetectionThreshold() {
+//     const all = [
+//         ...Object.values(axisLimitsConfig.generic || {}),
+//         ...Object.values(axisLimitsConfig.a1 || {}),
+//         ...Object.values(axisLimitsConfig.a2 || {}),
+//         pClassThresholds?.p1Min,
+//         pivotClassThresholds?.p1Min,
+//     ].filter(v => typeof v === 'number' && !isNaN(v) && v > 0);
+//     return all.length ? Math.min(...all) : FALLBACK_IMPACT_DETECTION_THRESHOLD_G;
+// }
+
 function impactDetectionThreshold() {
-    const all = [
-        ...Object.values(axisLimitsConfig.generic || {}),
-        ...Object.values(axisLimitsConfig.a1 || {}),
-        ...Object.values(axisLimitsConfig.a2 || {}),
-        pClassThresholds?.p1Min,
-        pivotClassThresholds?.p1Min,
-    ].filter(v => typeof v === 'number' && !isNaN(v) && v > 0);
-    return all.length ? Math.min(...all) : FALLBACK_IMPACT_DETECTION_THRESHOLD_G;
+    const floors = [pClassThresholds?.p1Min, pivotClassThresholds?.p1Min]
+        .filter(v => typeof v === 'number' && !isNaN(v) && v > 0);
+    return floors.length ? Math.min(...floors) : FALLBACK_IMPACT_DETECTION_THRESHOLD_G;
 }
 
 function getLocalIP() {
@@ -425,18 +432,8 @@ function appendRawLog(sensorId, row) {
             gpsLat, gpsLon,
         ].join(',') + '\n';
 
-        fs.appendFileSync(file, isNew ? rawLogThresholdBanner() + RAW_LOG_HEADER + line : line);
+        fs.appendFileSync(file, isNew ? RAW_LOG_HEADER + line : line);
     } catch (e) { console.error('[raw_log] append failed:', e.message); }
-}
-
-// One-line "# ..." comment prepended to each new day's raw log, showing the
-// P1/P2/P3 min-thresholds in effect when the file was started — so anyone
-// reading the CSV later knows what limits classified these readings, without
-// having to cross-reference thresholds.json separately. Axle (AB-L/AB-R) and
-// pivot (TRC-P/TV-P) get their own thresholds since pivot's bands are lower.
-function rawLogThresholdBanner() {
-    const fmt = t => `P1:${t.p1Min}G,P2:${t.p2Min}G,P3:${t.p3Min}G(Min Threshold)`;
-    return `# AXLE ${fmt(pClassThresholds)} | PIVOT ${fmt(pivotClassThresholds)}\n`;
 }
 
 // ── Express / Socket.IO / Postgres ─────────────────────────────────────────
@@ -934,7 +931,8 @@ let lastGpsFixAt   = 0; // Date.now() of the most recent GPS fix — drives the 
 // ── computeStats ──────────────────────────────────────────────────────────
 async function computeStats(hours = 24) {
     const dbNow  = await getDBNow();
-    const cutoff = new Date(dbNow.getTime() - hours * 3600000).toISOString();
+    const isnow = DateTime.fromJSDate(dbNow).setZone(TIMEZONE);
+    const cutoff = isnow.startOf('day').toUTC().toISO();
 
     if (pgReady) {
         try {
@@ -1218,7 +1216,7 @@ app.get('/api/historical/graph/:hours', async (req, res) => {
             if (idx !== -1) buckets[sec][`accel${idx + 1}`] = doc.x_axis || 0;
         });
 
-        res.json(Object.values(buckets).sort((a, b) => a.timestamp.localeCompare(b.timestamp)));
+        // res.json(Object.values(buckets).sort((a, b) => a.timestamp.localeCompare(b.timestamp)));
     } catch (e) {
         console.error('/api/historical/graph error:', e);
         res.status(500).json({ error: e.message });

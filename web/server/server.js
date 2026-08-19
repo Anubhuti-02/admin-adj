@@ -981,6 +981,28 @@ let lastSpeedFixAt = null; // Date.now() of the most recent GPS fix — drives t
 let lastGpsCoord   = null;
 let lastGpsFixAt   = 0; // Date.now() of the most recent GPS fix — drives the 'gps' health key
 
+// BUG FIX: totalDistanceM previously only advanced via Haversine distance
+// between consecutive GPS fixes, gated to d >= 5m to reject position-noise
+// jitter. At this system's actual fix rate (roughly every 1-3s) real but
+// slow-speed movement (walking pace, bench testing, low-speed running)
+// produces per-fix hops well under 5m — so every single hop got discarded
+// as "noise" and totalDistanceM stayed at 0 forever, even with a valid,
+// moving GPS fix. Switched to speed x elapsed-time integration, which
+// accumulates continuously regardless of how small each individual GPS
+// step is, using the GPS module's own speed reading (also more stable at
+// low speed than differencing two nearby, jittery lat/lng fixes).
+function accumulateDistance(speedKmh, now) {
+    if (lastGpsCoord?.fixAt) {
+        const elapsedS = (now - lastGpsCoord.fixAt) / 1000;
+        // Guard against a stale/huge gap (e.g. reconnect after minutes offline)
+        // producing a bogus multi-km jump from one speed sample.
+        if (elapsedS > 0 && elapsedS < 30) {
+            const avgSpeedKmh = ((speedKmh ?? 0) + (lastGpsCoord.speedKmh ?? 0)) / 2;
+            totalDistanceM += avgSpeedKmh * (1000 / 3600) * elapsedS;
+        }
+    }
+}
+
 // ── computeStats ──────────────────────────────────────────────────────────
 async function computeStats(hours = 24) {
     const dbNow  = await getDBNow();
@@ -1839,16 +1861,11 @@ async function handleBinarySensorPacket(sensorMeta, message, timestamp) {
 
     // GPS — only sensor "left" is treated as the reference GPS source, same as before
     if (sensorId === 'left' && lat && lng) {
-        if (lastGpsCoord) {
-            const dLat = (lat - lastGpsCoord.lat) * Math.PI / 180;
-            const dLon = (lng - lastGpsCoord.lng) * Math.PI / 180;
-            const a    = Math.sin(dLat/2)**2 + Math.cos(lastGpsCoord.lat * Math.PI/180) * Math.cos(lat * Math.PI/180) * Math.sin(dLon/2)**2;
-            const d    = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-            if (d >= 5 && d < 500) totalDistanceM += d;
-        }
         const speedKmh = +(speedMs * 0.036).toFixed(2);
-        lastGpsCoord = { lat, lng, speedKmh };
-        lastGpsFixAt = Date.now();
+        const nowMs = Date.now();
+        accumulateDistance(speedKmh, nowMs);
+        lastGpsCoord = { lat, lng, speedKmh, fixAt: nowMs };
+        lastGpsFixAt = nowMs;
         io.emit('gps-data', { lat, lng, speedKmh, totalDistanceM, timestamp });
         if (pgReady) {
             pool.query('INSERT INTO rm_gps (timestamp, lat, lng, speed_kmh, total_distance_m) VALUES ($1,$2,$3,$4,$5)',
@@ -1968,16 +1985,10 @@ mqttClient.on('message', async (topic, message) => {
                 const speedCms = spdM ? parseFloat(spdM[1]) : 0;
                 const speedKmh = +(speedCms * 0.036).toFixed(2);
 
-                if (lastGpsCoord) {
-                    const R    = 6371000;
-                    const dLat = (lat - lastGpsCoord.lat) * Math.PI / 180;
-                    const dLon = (lng - lastGpsCoord.lng) * Math.PI / 180;
-                    const a    = Math.sin(dLat/2)**2 + Math.cos(lastGpsCoord.lat * Math.PI/180) * Math.cos(lat * Math.PI/180) * Math.sin(dLon/2)**2;
-                    const d    = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-                    if (d >= 5 && d < 500) totalDistanceM += d;
-                }
-                lastGpsCoord = { lat, lng, speedKmh };
-                lastGpsFixAt = Date.now();
+                const nowMs = Date.now();
+                accumulateDistance(speedKmh, nowMs);
+                lastGpsCoord = { lat, lng, speedKmh, fixAt: nowMs };
+                lastGpsFixAt = nowMs;
                 io.emit('gps-data', { lat, lng, speedKmh, totalDistanceM, timestamp });
                 if (pgReady) {
                     pool.query('INSERT INTO rm_gps (timestamp, lat, lng, speed_kmh, total_distance_m) VALUES ($1,$2,$3,$4,$5)',
@@ -2149,16 +2160,10 @@ function crc16Ccitt(buf) {
 
 function processGpsFix(lat, lng, speedKmh) {
     const timestamp = getTimezoneTimestamp();
-    if (lastGpsCoord) {
-        const R    = 6371000;
-        const dLat = (lat - lastGpsCoord.lat) * Math.PI / 180;
-        const dLon = (lng - lastGpsCoord.lng) * Math.PI / 180;
-        const a    = Math.sin(dLat / 2) ** 2 + Math.cos(lastGpsCoord.lat * Math.PI / 180) * Math.cos(lat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
-        const d    = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-        if (d >= 5 && d < 500) totalDistanceM += d;
-    }
-    lastGpsCoord = { lat, lng, speedKmh };
-    lastGpsFixAt = Date.now();
+    const nowMs = Date.now();
+    accumulateDistance(speedKmh, nowMs);
+    lastGpsCoord = { lat, lng, speedKmh, fixAt: nowMs };
+    lastGpsFixAt = nowMs;
     if (lastSpeedFixAt) {
     const dtSec = (lastGpsFixAt - lastSpeedFixAt) / 1000;
     speedDistanceM += (speedKmh / 3.6) * dtSec;   // km/h → m/s, × elapsed seconds

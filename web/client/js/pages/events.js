@@ -46,6 +46,10 @@ async function loadAxisLimits() {
 function limitForSensor(sensor, axis) {
     const key = sensor === 'left' ? 'a1' : sensor === 'right' ? 'a2' : 'generic';
     const v = axisLimitsData[key] && axisLimitsData[key][axis];
+    // v is now an object {p1, p2, p3} — extract p1 for the raw crossing threshold
+    if (v && typeof v === 'object' && typeof v.p1 === 'number' && !isNaN(v.p1)) {
+        return v.p1;
+    }
     return (typeof v === 'number' && !isNaN(v)) ? v : null;
 }
 
@@ -303,44 +307,21 @@ document.getElementById('filterDate')?.addEventListener('change', () => {
     fetchEvents();
 });
 
-async function exportEvents() {
+function exportEvents() {
     const dateInput = document.getElementById('filterDate');
     const url = new URL(`${API}/api/impacts/export/csv`);
 
-    let rangeLabel = 'export';
     if (dateInput && dateInput.value) {
         const [y, m, d] = dateInput.value.split('-').map(Number);
         const start = new Date(y, m - 1, d); start.setHours(0, 0, 0, 0);
         const end   = new Date(y, m - 1, d); end.setHours(23, 59, 59, 999);
         url.searchParams.set('from', start.toISOString());
         url.searchParams.set('to',   end.toISOString());
-        rangeLabel = dateInput.value;
     } else if (HISTORY_FROM && HISTORY_TO) {
         url.searchParams.set('from', HISTORY_FROM);
         url.searchParams.set('to',   HISTORY_TO);
-        rangeLabel = `${HISTORY_FROM.slice(0, 10)}_${HISTORY_TO.slice(0, 10)}`;
     }
 
-    // Prefer the remembered save folder (e.g. the external drive) — falls
-    // back to the browser's normal download behavior (window.open) if
-    // nothing's been chosen yet, or the browser doesn't support the File
-    // System Access API (Firefox/Safari) at all.
-    const filename = `acceleration-events-${rangeLabel}.csv`;
-    try {
-        const resp = await fetch(url.toString());
-        if (!resp.ok) throw new Error(`Export request failed: ${resp.status}`);
-        const blob = await resp.blob();
-
-        const savedToFolder = await ReportSaveTarget.saveBlob(blob, filename);
-        if (savedToFolder) {
-            showReportSaveStatus(`Saved "${filename}" to the chosen folder.`, false);
-            return;
-        }
-    } catch (e) {
-        console.error('[exportEvents] Direct save failed, falling back to browser download:', e);
-    }
-
-    // No folder remembered yet, or the direct write failed — same behavior as before.
     window.open(url.toString(), '_blank');
 }
 window.exportEvents = exportEvents;

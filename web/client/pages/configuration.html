@@ -166,27 +166,68 @@
                 </div>
             </div>
 
-            <!-- Axis Limit Values - Left -->
+            <!-- Axis Limit Values - Left (unit: a1) -->
             <div class="peak-limits-section">
                 <div class="peak-limits-header">
                     <h3><i class="fas fa-microchip" style="color: #0891b2; margin-right: 8px;"></i>Axis Limit Values - Left</h3>
-                    <span style="color: #64748b; font-size: 0.9rem;">A reading whose |value| meets or exceeds this g-value crosses the limit for Accelerometer 1 (Left).</span>
+                    <span style="color: #64748b; font-size: 0.9rem;">P1/P2/P3 g-bands per axis for Accelerometer 1 (Left).</span>
                 </div>
 
                 <div class="axis-limit-single-row">
                     <div class="axis-limit-single axis-x">
-                        <label><i class="fas fa-arrows-alt-h"></i> X-Axis Limit (g)</label>
-                        <input type="number" id="axisLimitA1X" step="0.01" min="0" placeholder="0.5">
+                        <label><i class="fas fa-arrows-alt-h"></i> X-Axis (g)</label>
+                        <div class="axis-band-row">
+                            <div class="axis-band">
+                                <span class="band-tab p1">P1</span>
+                                <input type="number" id="axisLimitA1XP1" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                            <div class="axis-band">
+                                <span class="band-tab p2">P2</span>
+                                <input type="number" id="axisLimitA1XP2" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                            <div class="axis-band">
+                                <span class="band-tab p3">P3</span>
+                                <input type="number" id="axisLimitA1XP3" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                        </div>
                         <span class="axis-limit-current" id="axisLimitA1XCurrent">Current: —</span>
                     </div>
+
                     <div class="axis-limit-single axis-y">
-                        <label><i class="fas fa-arrows-alt-v"></i> Y-Axis Limit (g)</label>
-                        <input type="number" id="axisLimitA1Y" step="0.01" min="0" placeholder="0.5">
+                        <label><i class="fas fa-arrows-alt-v"></i> Y-Axis (g)</label>
+                        <div class="axis-band-row">
+                            <div class="axis-band">
+                                <span class="band-tab p1">P1</span>
+                                <input type="number" id="axisLimitA1YP1" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                            <div class="axis-band">
+                                <span class="band-tab p2">P2</span>
+                                <input type="number" id="axisLimitA1YP2" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                            <div class="axis-band">
+                                <span class="band-tab p3">P3</span>
+                                <input type="number" id="axisLimitA1YP3" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                        </div>
                         <span class="axis-limit-current" id="axisLimitA1YCurrent">Current: —</span>
                     </div>
+
                     <div class="axis-limit-single axis-z">
-                        <label><i class="fas fa-arrow-up"></i> Z-Axis Limit (g)</label>
-                        <input type="number" id="axisLimitA1Z" step="0.01" min="0" placeholder="0.5">
+                        <label><i class="fas fa-arrow-up"></i> Z-Axis (g)</label>
+                        <div class="axis-band-row">
+                            <div class="axis-band">
+                                <span class="band-tab p1">P1</span>
+                                <input type="number" id="axisLimitA1ZP1" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                            <div class="axis-band">
+                                <span class="band-tab p2">P2</span>
+                                <input type="number" id="axisLimitA1ZP2" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                            <div class="axis-band">
+                                <span class="band-tab p3">P3</span>
+                                <input type="number" id="axisLimitA1ZP3" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                        </div>
                         <span class="axis-limit-current" id="axisLimitA1ZCurrent">Current: —</span>
                     </div>
                 </div>
@@ -197,27 +238,68 @@
                 </div>
             </div>
 
-            <!-- Axis Limit Values - Right -->
+            <!-- Axis Limit Values - Right (unit: a2) -->
             <div class="peak-limits-section">
                 <div class="peak-limits-header">
                     <h3><i class="fas fa-microchip" style="color: #7c3aed; margin-right: 8px;"></i>Axis Limit Values - Right</h3>
-                    <span style="color: #64748b; font-size: 0.9rem;">A reading whose |value| meets or exceeds this g-value crosses the limit for Accelerometer 2 (Right).</span>
+                    <span style="color: #64748b; font-size: 0.9rem;">P1/P2/P3 g-bands per axis for Accelerometer 2 (Right).</span>
                 </div>
 
                 <div class="axis-limit-single-row">
                     <div class="axis-limit-single axis-x">
-                        <label><i class="fas fa-arrows-alt-h"></i> X-Axis Limit (g)</label>
-                        <input type="number" id="axisLimitA2X" step="0.01" min="0" placeholder="0.5">
+                        <label><i class="fas fa-arrows-alt-h"></i> X-Axis (g)</label>
+                        <div class="axis-band-row">
+                            <div class="axis-band">
+                                <span class="band-tab p1">P1</span>
+                                <input type="number" id="axisLimitA2XP1" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                            <div class="axis-band">
+                                <span class="band-tab p2">P2</span>
+                                <input type="number" id="axisLimitA2XP2" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                            <div class="axis-band">
+                                <span class="band-tab p3">P3</span>
+                                <input type="number" id="axisLimitA2XP3" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                        </div>
                         <span class="axis-limit-current" id="axisLimitA2XCurrent">Current: —</span>
                     </div>
+
                     <div class="axis-limit-single axis-y">
-                        <label><i class="fas fa-arrows-alt-v"></i> Y-Axis Limit (g)</label>
-                        <input type="number" id="axisLimitA2Y" step="0.01" min="0" placeholder="0.5">
+                        <label><i class="fas fa-arrows-alt-v"></i> Y-Axis (g)</label>
+                        <div class="axis-band-row">
+                            <div class="axis-band">
+                                <span class="band-tab p1">P1</span>
+                                <input type="number" id="axisLimitA2YP1" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                            <div class="axis-band">
+                                <span class="band-tab p2">P2</span>
+                                <input type="number" id="axisLimitA2YP2" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                            <div class="axis-band">
+                                <span class="band-tab p3">P3</span>
+                                <input type="number" id="axisLimitA2YP3" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                        </div>
                         <span class="axis-limit-current" id="axisLimitA2YCurrent">Current: —</span>
                     </div>
+
                     <div class="axis-limit-single axis-z">
-                        <label><i class="fas fa-arrow-up"></i> Z-Axis Limit (g)</label>
-                        <input type="number" id="axisLimitA2Z" step="0.01" min="0" placeholder="0.5">
+                        <label><i class="fas fa-arrow-up"></i> Z-Axis (g)</label>
+                        <div class="axis-band-row">
+                            <div class="axis-band">
+                                <span class="band-tab p1">P1</span>
+                                <input type="number" id="axisLimitA2ZP1" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                            <div class="axis-band">
+                                <span class="band-tab p2">P2</span>
+                                <input type="number" id="axisLimitA2ZP2" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                            <div class="axis-band">
+                                <span class="band-tab p3">P3</span>
+                                <input type="number" id="axisLimitA2ZP3" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                        </div>
                         <span class="axis-limit-current" id="axisLimitA2ZCurrent">Current: —</span>
                     </div>
                 </div>
@@ -228,27 +310,68 @@
                 </div>
             </div>
 
-            <!-- Axis Limit Values - Pivot -->
+            <!-- Axis Limit Values - Pivot (unit: generic) -->
             <div class="peak-limits-section">
                 <div class="peak-limits-header">
                     <h3><i class="fas fa-microchip" style="color: #22c55e; margin-right: 8px;"></i>Axis Limit Values - Pivot</h3>
-                    <span style="color: #64748b; font-size: 0.9rem;">A reading whose |value| meets or exceeds this g-value crosses the limit for the Pivot sensor.</span>
+                    <span style="color: #64748b; font-size: 0.9rem;">P1/P2/P3 g-bands per axis for the Pivot sensor.</span>
                 </div>
 
                 <div class="axis-limit-single-row">
                     <div class="axis-limit-single axis-x">
-                        <label><i class="fas fa-arrows-alt-h"></i> X-Axis Limit (g)</label>
-                        <input type="number" id="axisLimitGenX" step="0.01" min="0" placeholder="0.5">
+                        <label><i class="fas fa-arrows-alt-h"></i> X-Axis (g)</label>
+                        <div class="axis-band-row">
+                            <div class="axis-band">
+                                <span class="band-tab p1">P1</span>
+                                <input type="number" id="axisLimitGenXP1" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                            <div class="axis-band">
+                                <span class="band-tab p2">P2</span>
+                                <input type="number" id="axisLimitGenXP2" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                            <div class="axis-band">
+                                <span class="band-tab p3">P3</span>
+                                <input type="number" id="axisLimitGenXP3" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                        </div>
                         <span class="axis-limit-current" id="axisLimitGenXCurrent">Current: —</span>
                     </div>
+
                     <div class="axis-limit-single axis-y">
-                        <label><i class="fas fa-arrows-alt-v"></i> Y-Axis Limit (g)</label>
-                        <input type="number" id="axisLimitGenY" step="0.01" min="0" placeholder="0.5">
+                        <label><i class="fas fa-arrows-alt-v"></i> Y-Axis (g)</label>
+                        <div class="axis-band-row">
+                            <div class="axis-band">
+                                <span class="band-tab p1">P1</span>
+                                <input type="number" id="axisLimitGenYP1" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                            <div class="axis-band">
+                                <span class="band-tab p2">P2</span>
+                                <input type="number" id="axisLimitGenYP2" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                            <div class="axis-band">
+                                <span class="band-tab p3">P3</span>
+                                <input type="number" id="axisLimitGenYP3" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                        </div>
                         <span class="axis-limit-current" id="axisLimitGenYCurrent">Current: —</span>
                     </div>
+
                     <div class="axis-limit-single axis-z">
-                        <label><i class="fas fa-arrow-up"></i> Z-Axis Limit (g)</label>
-                        <input type="number" id="axisLimitGenZ" step="0.01" min="0" placeholder="0.5">
+                        <label><i class="fas fa-arrow-up"></i> Z-Axis (g)</label>
+                        <div class="axis-band-row">
+                            <div class="axis-band">
+                                <span class="band-tab p1">P1</span>
+                                <input type="number" id="axisLimitGenZP1" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                            <div class="axis-band">
+                                <span class="band-tab p2">P2</span>
+                                <input type="number" id="axisLimitGenZP2" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                            <div class="axis-band">
+                                <span class="band-tab p3">P3</span>
+                                <input type="number" id="axisLimitGenZP3" step="0.01" min="0" placeholder="0.5">
+                            </div>
+                        </div>
                         <span class="axis-limit-current" id="axisLimitGenZCurrent">Current: —</span>
                     </div>
                 </div>

@@ -456,6 +456,18 @@
         return (axisLimitsConfig[unit] && axisLimitsConfig[unit][axisLetter]) || null;
     }
 
+    // "# Threshold Configuration: ..." banner — first line of every
+    // generated report on this page, mirroring server.js's
+    // thresholdConfigBanner() so raw log / impact / km-wise reports are all
+    // self-documenting about which limits were active without having to
+    // cross-reference the Configuration page separately.
+    function thresholdConfigBannerLine() {
+        const fmtRange = t => t ? `P1:${t.p1Min}G,P2:${t.p2Min}G,P3:${t.p3Min}G(Min)` : 'not configured';
+        const axle  = fmtRange(thresholdsConfig.axle);
+        const pivot = fmtRange(thresholdsConfig.pivot);
+        return `# Threshold Configuration — AXLE ${axle} | PIVOT ${pivot}`;
+    }
+
     // Classifies a raw axis reading into P1/P2/P3 using the Axis Limit
     // Values' single g cutoffs (not min/max ranges) — a reading crosses a
     // band once |value| >= that band's configured value, same semantics as
@@ -1163,6 +1175,12 @@
         if (!(routeTapeData && routeTapeKmNums.length)) return null;
 
         const rows = [];
+
+        // Threshold Configuration banner — always the very first line of any
+        // generated report, so the CSV is self-documenting about which
+        // limits were in effect without cross-referencing the Configuration
+        // page separately. Mirrors server.js's thresholdConfigBanner().
+        rows.push(thresholdConfigBannerLine());
 
         // Report Header
         rows.push("Datalogger - Full Day KM Wise Acceleration Report");

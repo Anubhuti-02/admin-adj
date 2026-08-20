@@ -481,7 +481,7 @@ function appendRawLog(sensorId, row) {
             gpsLat, gpsLon,
         ].join(',') + '\n';
 
-        fs.appendFileSync(file, isNew ? RAW_LOG_HEADER + line : line);
+        fs.appendFileSync(file, isNew ? thresholdConfigBanner() + RAW_LOG_HEADER + line : line);
     } catch (e) { console.error('[raw_log] append failed:', e.message); }
 }
 
@@ -811,6 +811,19 @@ console.log('[thresholds] Pivot loaded:', pivotClassThresholds);
 // ★ PIVOT CHANGE — picks the right threshold set for a given sensor id
 function thresholdsFor(sensorId) {
     return sensorId === 'pivot' ? pivotClassThresholds : pClassThresholds;
+}
+
+// Shared "# Threshold Configuration: ..." banner line, prepended to every
+// generated report (raw log, impact-event CSV, km-wise CSV) so each file is
+// self-documenting about which limits classified its readings, without
+// having to cross-reference thresholds.json/axis_limits.json separately.
+// Reads the live in-memory config at call time, not load time, so it always
+// reflects whatever was active when that specific report/file was written.
+function thresholdConfigBanner() {
+    const fmt = t => `P1:${t.p1Min}G,P2:${t.p2Min}G,P3:${t.p3Min}G(Min)`;
+    const axle  = fmt(pClassThresholds);
+    const pivot = fmt(pivotClassThresholds);
+    return `# Threshold Configuration — AXLE ${axle} | PIVOT ${pivot}\n`;
 }
 
 // ★ PIVOT CHANGE — getPClass/getSeverity now take sensorId so pivot impacts
@@ -2517,6 +2530,7 @@ app.get('/api/test-report/csv', async (req, res) => {
 
         const lines = [];
         lines.push(`# TEST RUN REPORT`);
+        lines.push(thresholdConfigBanner().replace(/\n$/, ''));
         lines.push(`# Date,${fromDt.toLocaleDateString('en-IN')}`);
         lines.push(`# Start Time,${fromDt.toLocaleTimeString('en-IN')}`);
         lines.push(`# End Time,${toDt.toLocaleTimeString('en-IN')}`);
@@ -2596,7 +2610,7 @@ function buildImpactCsv(docs) {
         fmt(d.distance_m != null ? d.distance_m : '0'),
         fmt(d.lat != null ? (+d.lat).toFixed(6) : ''), fmt(d.lng != null ? (+d.lng).toFixed(6) : '')
     ].join(','));
-    return [IMPACT_CSV_HEADERS.join(','), ...rows].join('\n');
+    return thresholdConfigBanner() + [IMPACT_CSV_HEADERS.join(','), ...rows].join('\n');
 }
 
 // ── Automatic impact-report archiving — writes a CSV of new impact events
@@ -2681,24 +2695,11 @@ app.get('/api/impacts/export/csv', async (req, res) => {
 
     console.log(`[csv] Exporting ${docs.length} records (${label})`);
 
-    const headers = ['timestamp', 'sensor', 'severity', 'p_class', 'peak_g', 'rmsV', 'rmsL', 'sdV', 'sdL', 'p2pV', 'p2pL', 'x', 'y', 'z', 'fs', 'window_ms', 'distance_m', 'lat', 'lng'];
-    const fmt = v => (v == null || v === undefined) ? '' : String(v);
-    const rows = docs.map(d => [
-        fmt(d.timestamp), fmt(d.sensor), fmt(d.severity),
-        // ★ PIVOT CHANGE — pass d.sensor so a fallback classification (when
-        // p_class wasn't stored) uses the right threshold set for pivot rows
-        fmt(d.p_class || getPClass(d.peak_g, d.sensor) || ''),
-        fmt(d.peak_g != null ? (+d.peak_g).toFixed(6) : ''),
-        fmt(d.rmsV != null ? (+d.rmsV).toFixed(3) : ''), fmt(d.rmsL != null ? (+d.rmsL).toFixed(3) : ''),
-        fmt(d.sdV != null ? (+d.sdV).toFixed(3) : ''), fmt(d.sdL != null ? (+d.sdL).toFixed(3) : ''),
-        fmt(d.p2pV != null ? (+d.p2pV).toFixed(3) : ''), fmt(d.p2pL != null ? (+d.p2pL).toFixed(3) : ''),
-        fmt(d.x != null ? (+d.x).toFixed(3) : ''), fmt(d.y != null ? (+d.y).toFixed(3) : ''), fmt(d.z != null ? (+d.z).toFixed(3) : ''),
-        fmt(d.fs != null ? d.fs : ''), fmt(d.window_ms != null ? d.window_ms : ''),
-        fmt(d.distance_m != null ? d.distance_m : '0'),
-        fmt(d.lat != null ? (+d.lat).toFixed(6) : ''), fmt(d.lng != null ? (+d.lng).toFixed(6) : '')
-    ].join(','));
-
-    const csv = [headers.join(','), ...rows].join('\n');
+    // Was a drifted inline duplicate of buildImpactCsv() — same columns, but
+    // missing the threshold-configuration banner every other report now
+    // carries. Routed through the shared builder so this endpoint, the
+    // manual export elsewhere, and the auto-archiver can never drift again.
+    const csv = buildImpactCsv(docs);
     const filename = `${routePrefix()}impact_report_${label}.csv`;
 
     const archiveName = filename.replace(/\.csv$/, `_${archiveTimestamp()}.csv`);

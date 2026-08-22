@@ -68,15 +68,6 @@ const sensorById  = id => SENSORS.find(s => s.id === id);
 const sensorByPacketType = pt => SENSORS.find(s => s.packetType === pt);
 
 // ── ODR config persistence ──────────────────────────────────────────────
-// BUG FIX: odrConfig used to live only in memory (seeded with a hardcoded
-// 100 Hz for every sensor at boot) with no load/save pair, unlike every
-// other *Config object in this file (limitsConfig, routeConfig,
-// sectionConfig, ...). POSTs appeared to work for the running process, but
-// any server restart/redeploy silently threw the saved values away and
-// reset everyone back to 100 Hz — that was the "not saving" bug.
-// This also adds a persisted `odrDefaults` object so users can configure
-// their own per-sensor default (not just a hardcoded 100), which DELETE
-// now restores from instead of hardcoding.
 const ODR_CONFIG_FILE = path.join(__dirname, 'odr_config.json');
 const FALLBACK_ODR_HZ = 100;
 
@@ -91,8 +82,6 @@ function loadOdrConfig() {
     try {
         if (fs.existsSync(ODR_CONFIG_FILE)) {
             const saved = JSON.parse(fs.readFileSync(ODR_CONFIG_FILE, 'utf8'));
-            // merge onto defaults so a newly-added sensor in SENSORS still
-            // gets a value even if the file predates it
             return {
                 current:  { ...fallback, ...(saved.current  || {}) },
                 defaults: { ...fallback, ...(saved.defaults || {}) },
@@ -107,17 +96,14 @@ function saveOdrConfig(cfg) {
 }
 
 let odrStore = loadOdrConfig();
-// `odrConfig` stays as the live/current values so the rest of the file
-// (shouldEmit, etc.) doesn't need to change how it reads sensor ODRs.
 const odrConfig = odrStore.current;
 console.log('[ODR] Config loaded:', JSON.stringify(odrStore));
 
-// Sensor liveness + ODR decimation counters, keyed by sensor id
 const sensorLastSeen = {};
 const odrCounters    = {};
 SENSORS.forEach(s => { sensorLastSeen[s.id] = 0; odrCounters[s.id] = 0; });
 
-const SENSOR_TIMEOUT_MS = 10000; // 10s — mark FAIL if no packet in this window
+const SENSOR_TIMEOUT_MS = 10000;
 
 function shouldEmit(sensorId) {
     const s = sensorById(sensorId);
@@ -132,11 +118,6 @@ function shouldEmit(sensorId) {
 const PEAKS_LOG_FILE     = path.join(__dirname, 'peaks_log.json');
 const LIMITS_CONFIG_FILE = path.join(__dirname, 'limits_config.json');
 const AXIS_LIMITS_FILE = path.join(__dirname, 'axis_limits.json');
-// Matches thresholds.json's own p1Min floor (2g) — a lower default (previously
-// 0.5g, briefly 1g) sat below this sensor's normal ~1.0-1.08g baseline, so
-// nearly every reading counted as an "impact", flooding peaks_log.json
-// (467,923 entries / 11.4MB before the PEAKS_LOG_MAX_ENTRIES cap above) and
-// eventually OOM-crashing the process during JSON.stringify().
 const DEFAULT_AXIS_LIMIT = 2;
 const AXIS_LIMIT_BANDS = ['p1', 'p2', 'p3'];
 
@@ -152,9 +133,6 @@ function defaultAxisLimitsShape() {
     };
 }
 
-// Coerces one saved axis leaf into { p1, p2, p3 }. Handles the pre-band
-// shape (a bare number) transparently by seeding all three bands with it,
-// so existing axis_limits.json files from before this change still load.
 function coerceAxisBand(saved, fallback) {
     if (saved != null && typeof saved === 'object') {
         return {
@@ -171,7 +149,6 @@ function loadAxisLimits() {
     try {
         if (fs.existsSync(AXIS_LIMITS_FILE)) {
             const saved = JSON.parse(fs.readFileSync(AXIS_LIMITS_FILE, 'utf8'));
-            // merge onto defaults so missing keys (e.g. after upgrade) don't break the UI
             const defaults = defaultAxisLimitsShape();
             const out = {};
             for (const unit of ['generic', 'a1', 'a2']) {
@@ -194,54 +171,13 @@ function saveAxisLimitsToFile(cfg) {
 }
 let axisLimitsConfig = loadAxisLimits();
 
-// ─────────────────────────────────────────────────────────────────────────
-// FIX: the impact-detection gate below used to be hardcoded at `peakVal > 2`
-// in three separate places. That meant any reading between a low configured
-// axis limit (e.g. 0.5g) and 2g never became an event row at all — it never
-// hit accelerometer_events / peaksLog / the 'new-impact' socket event — so
-// events.js had nothing to attach the axis-limit tag to. This threshold now
-// tracks the lowest currently-configured axis limit automatically, so
-// lowering a limit in the UI also lowers the detection floor.
-// ─────────────────────────────────────────────────────────────────────────
 const FALLBACK_IMPACT_DETECTION_THRESHOLD_G = 2;
-// Was gated purely by axisLimitsConfig — lowering p1Min in Threshold
-// Configuration had no effect on whether a reading became an event at all,
-// only on how an already-logged event got classified, which read as
-// "changing the threshold does nothing" from the operator's side. Now also
-// takes the lower of the two P1 floors (axle sensors vs pivot), so either
-// threshold screen genuinely controls what gets detected, not just how it's
-// labeled afterward. pClassThresholds/pivotClassThresholds are declared
-// further down this file but that's fine — this function's body only runs
-// when called, well after module-load finishes.
 
-// function impactDetectionThreshold() {
-//     const all = [
-//         ...Object.values(axisLimitsConfig.generic || {}),
-//         ...Object.values(axisLimitsConfig.a1 || {}),
-//         ...Object.values(axisLimitsConfig.a2 || {}),
-//         pClassThresholds?.p1Min,
-//         pivotClassThresholds?.p1Min,
-//     ].filter(v => typeof v === 'number' && !isNaN(v) && v > 0);
-//     return all.length ? Math.min(...all) : FALLBACK_IMPACT_DETECTION_THRESHOLD_G;
-// }
-
-// RESTORED — this was left commented out while still being called live at
-// three call sites below (processRawAccelReading paths), which threw
-// "impactDetectionThreshold is not defined" on every packet and silently
-// broke ingestion (no DB writes, no socket emits, dashboards read as
-// offline/stale even though the TCP/socket connection itself was fine).
-//
-// Adapted for the P1/P2/P3 axis-limit bands: each axis leaf in
-// axisLimitsConfig is now { p1, p2, p3 } instead of a single number, so
-// Object.values(...) per unit yields band objects, not numbers. flattenBands()
-// pulls the individual p1/p2/p3 numbers out of each axis before filtering,
-// preserving the original "take the lowest configured floor across
-// everything" behavior.
 function flattenAxisLimitUnit(unitCfg) {
     const out = [];
     for (const axisBands of Object.values(unitCfg || {})) {
         if (axisBands && typeof axisBands === 'object') out.push(...Object.values(axisBands));
-        else out.push(axisBands); // tolerate any pre-band numeric leftovers
+        else out.push(axisBands);
     }
     return out;
 }
@@ -252,6 +188,21 @@ function impactDetectionThreshold() {
         pivotClassThresholds?.p1Min,
     ].filter(v => typeof v === 'number' && !isNaN(v) && v > 0);
     return all.length ? Math.min(...all) : FALLBACK_IMPACT_DETECTION_THRESHOLD_G;
+}
+
+function axisLimitUnitForSensor(sensorId) {
+    return sensorId === 'left' ? 'a1' : sensorId === 'right' ? 'a2' : 'generic';
+}
+
+function crossesAxisLimit(sensorId, x, y) {
+    const unit = axisLimitUnitForSensor(sensorId);
+    const cfg = axisLimitsConfig[unit];
+    if (!cfg) return false;
+    const xLimit = cfg.x?.p1;
+    const yLimit = cfg.y?.p1;
+    const xHit = typeof xLimit === 'number' && !isNaN(xLimit) && Math.abs(x) >= xLimit;
+    const yHit = typeof yLimit === 'number' && !isNaN(yLimit) && Math.abs(y) >= yLimit;
+    return xHit || yHit;
 }
 
 function getLocalIP() {
@@ -265,15 +216,6 @@ function getLocalIP() {
 }
 const LOCAL_IP = getLocalIP();
 
-// Hard cap on peaksLog's length — this is the local-file fallback used only
-// when Postgres isn't ready (accelerometer_events is the real, unbounded
-// store), so it never needs unlimited history. Without a cap this file grew
-// to 11.4MB / 467,923 entries (axis-limit thresholds set too low flagged
-// nearly every reading as an "impact"), and JSON.stringify()'ing the whole
-// array on every single new push eventually OOM-crashed the process —
-// after which no /api/impacts data could be served at all, from either
-// Postgres or the file, until the process was manually restarted. Matches
-// the 2000-row cap /api/impacts already applies to its own Postgres query.
 const PEAKS_LOG_MAX_ENTRIES = 2000;
 
 function loadPeaksLog() {
@@ -286,7 +228,6 @@ function savePeaksLog(log) {
     try { fs.writeFileSync(PEAKS_LOG_FILE, JSON.stringify(log, null, 2)); }
     catch (e) { console.error('peaks_log.json write error:', e.message); }
 }
-/** Appends `impact` to peaksLog and trims from the front if over the cap — use this instead of peaksLog.push() directly. */
 function pushToPeaksLog(impact) {
     peaksLog.push(impact);
     if (peaksLog.length > PEAKS_LOG_MAX_ENTRIES) {
@@ -296,7 +237,7 @@ function pushToPeaksLog(impact) {
 let peaksLog = loadPeaksLog();
 if (peaksLog.length > PEAKS_LOG_MAX_ENTRIES) {
     peaksLog = peaksLog.slice(-PEAKS_LOG_MAX_ENTRIES);
-    savePeaksLog(peaksLog); // shrink the on-disk file immediately too, not just the in-memory copy
+    savePeaksLog(peaksLog);
 }
 console.log(`Loaded ${peaksLog.length} existing impact records from JSON fallback`);
 
@@ -327,7 +268,6 @@ function saveRouteConfig(cfg) {
 let routeConfig = loadRouteConfig();
 console.log('[route] Config loaded:', JSON.stringify(routeConfig));
 
-// Builds the "NDLS-LJN_" prefix (or "" if unset) — used by every report filename site
 function routePrefix() {
     if (!routeConfig.origin || !routeConfig.destination) return '';
     return `${routeConfig.origin}-${routeConfig.destination}_`;
@@ -347,9 +287,6 @@ function saveSectionConfig(cfg) {
 let sectionConfig = loadSectionConfig();
 console.log('[section] Config loaded:', JSON.stringify(sectionConfig));
 
-// ── Chainage preview — standalone, read-only comparison tool. Separate from
-// any future live chainage feature; does not touch route_config/section_config
-// or any existing report/GPS logic.
 const CHAINAGE_PREVIEW_FILE = path.join(__dirname, 'chainage_preview.json');
 function loadChainagePreview() {
     try {
@@ -365,46 +302,46 @@ let chainagePreview = loadChainagePreview();
 console.log('[chainage-preview] Loaded:', chainagePreview ? `${chainagePreview.rows.length} rows` : 'none');
 
 // ── Report archival — on-demand export archives + continuous raw log ──────
+const GEONIX_LABEL = 'Geonix PowerShell S3 - PHDD';
 
-// REPORTS_DIR defaults to the external Geonix drive (932GB) so the
-// continuous raw/impact/km-wise logs land directly on it rather than the
-// server's local disk — set REPORTS_DIR_OVERRIDE in .env to point elsewhere
-// instead. Falls back to the old local `reports/` folder if the external
-// drive isn't mounted (e.g. unplugged) so a missing drive degrades
-// gracefully instead of crashing startup or silently dropping every report
-// write.
-//
-// Mounted at /mnt/geonix via a static /etc/fstab entry (UUID-keyed,
-// `force,nofail` — `force` because this NTFS volume reliably comes up
-// "dirty" per ntfs3's own dirty-bit check even after a clean unmount/
-// ntfsfix, for reasons not fully pinned down; `nofail` so a missing/
-// unplugged drive doesn't block boot), not the desktop's udisks2 auto-mount
-// (whose "Geonix PowerShell S3 - PHDD" label path contains spaces and
-// proved unreliable to mount programmatically). Every machine that runs
-// this server needs the same one-time `/etc/fstab` line added locally —
-// see the project notes for the exact entry.
-const GEONIX_MOUNT_PATH = '/mnt/geonix/UABAMS_reports';
-/**
- * fs.existsSync(path.dirname(GEONIX_MOUNT_PATH)) used to be the check here,
- * but /mnt/geonix is a real directory (the mount point itself, owned by
- * root) whether or not the drive is actually mounted into it — so an
- * unplugged drive still passed that check, then failed with EACCES trying
- * to mkdir inside the empty root-owned mount point. This instead checks
- * /proc/mounts for an actual active mount at that path, which only true
- * when the drive is really there.
- */
-function isMounted(dirPath) {
+function findGeonixMountPoint() {
     try {
+        const byLabelPath = `/dev/disk/by-label/${GEONIX_LABEL.replace(/ /g, '\\x20')}`;
+        if (!fs.existsSync(byLabelPath)) return null;
+        const devicePath = fs.realpathSync(byLabelPath);
+
         const mounts = fs.readFileSync('/proc/mounts', 'utf8');
-        return mounts.split('\n').some(line => line.split(' ')[1] === dirPath);
+        for (const line of mounts.split('\n')) {
+            const [device, mountPoint] = line.split(' ');
+            if (device && fs.existsSync(device) && fs.realpathSync(device) === devicePath) {
+                return mountPoint.replace(/\\040/g, ' ');
+            }
+        }
+        return null;
     } catch (e) {
-        return false; // non-Linux or unreadable — treat as not mounted, fall through to local
+        return null;
     }
 }
+
+// ── Live "is the drive actually here right now" check ─────────────────────
+// Re-checked on every archiver tick (not just once at boot) so a mid-run
+// disconnect just causes that hour's cycle to skip — the setInterval timers
+// themselves never stop — and the very next tick after the drive reappears
+// resumes writing normally, with no restart required.
+function geonixCurrentlyMounted() {
+    return !!findGeonixMountPoint();
+}
+
 function resolveReportsDir() {
     if (process.env.REPORTS_DIR_OVERRIDE) return process.env.REPORTS_DIR_OVERRIDE;
-    if (isMounted(path.dirname(GEONIX_MOUNT_PATH))) return GEONIX_MOUNT_PATH;
-    console.warn('[reports] Geonix drive not mounted at expected path — falling back to local reports/ folder.');
+
+    const liveMount = findGeonixMountPoint();
+    if (liveMount) {
+        console.log(`[reports] Geonix drive found mounted at ${liveMount}`);
+        return path.join(liveMount, 'reports');
+    }
+
+    console.warn(`[reports] Geonix drive (label "${GEONIX_LABEL}") not found mounted anywhere — falling back to local reports/ folder.`);
     return path.join(__dirname, 'reports');
 }
 const REPORTS_DIR         = resolveReportsDir();
@@ -413,41 +350,31 @@ const IMPACT_REPORTS_DIR  = path.join(REPORTS_DIR, 'impact_events');
 const TESTRUN_REPORTS_DIR = path.join(REPORTS_DIR, 'test_runs');
 const KMWISE_REPORTS_DIR  = path.join(REPORTS_DIR, 'km_wise');
 const RAW_LOG_DIR         = path.join(REPORTS_DIR, 'raw_log');
+const RAW_MONITORING_BACKUP_DIR = path.join(REPORTS_DIR, 'raw_monitoring_backup');
 
-[IMPACT_REPORTS_DIR, TESTRUN_REPORTS_DIR, KMWISE_REPORTS_DIR, RAW_LOG_DIR].forEach(d => {
+[IMPACT_REPORTS_DIR, TESTRUN_REPORTS_DIR, KMWISE_REPORTS_DIR, RAW_LOG_DIR, RAW_MONITORING_BACKUP_DIR].forEach(d => {
     try { fs.mkdirSync(d, { recursive: true }); }
     catch (e) { console.error(`[reports] Could not create ${d}:`, e.message); }
 });
 
 function archiveTimestamp() {
-    return getTimezoneTimestamp().slice(0, 19).replace('T', '_').replace(/:/g, '-'); // "2026-07-28_14-30-05"
+    return getTimezoneTimestamp().slice(0, 19).replace('T', '_').replace(/:/g, '-');
 }
 
-// Continuous, always-on raw-reading log — ONE combined CSV per day across
-// all sensors (track-geometry-car report format), independent of any
-// export/test-run action. Never throws: a disk issue here must never break
-// the live Postgres/Socket.IO data pipeline.
-//
-// Each sensor is an independent TCP connection with its own ~1s window
-// cadence — there's no shared clock across boards, so a "combined row"
-// reflects each sensor's *latest known* reading at write time, not a true
-// simultaneous sample (same tradeoff /api/test-report/csv already accepts
-// via index-based joining, just applied live here instead of in a batch
-// Postgres query).
-const latestSensorReading = {}; // { left: {x,y}, right: {...}, pivot: {...}, aux: {...} }
+const latestSensorReading = {};
 const SENSOR_COLUMN_PAIR = { left: 'AB-L', right: 'AB-R', pivot: 'TRC-P', aux: 'TV-P' };
 const RAW_LOG_HEADER = 'Counter,Block,Railway,Division code,Division,Section,Line,SPD,KM,Meter,Millimeter,AB-L-VERT,AB-L-LAT,AB-R-VERT,AB-R-LAT,TRC-P-VERT,TRC-P-LAT,TV-P-VERT,TV-P-LAT,Rail: LH,Rail: RH,GPS Lat,GPS Lon\n';
 const RAW_LOG_COUNTER_START = 100000;
 const RAW_LOG_COUNTER_STEP  = 250;
-let rawLogCounter = RAW_LOG_COUNTER_START; // resets whenever a new day's combined file starts
+let rawLogCounter = RAW_LOG_COUNTER_START;
 let rawLogCurrentFile = null;
 
 function appendRawLog(sensorId, row) {
     try {
         latestSensorReading[sensorId] = { x: row.x, y: row.y };
 
-        const dateStr = getTimezoneTimestamp().slice(0, 10); // "YYYY-MM-DD"
-        const file = path.join(RAW_LOG_DIR, `${routePrefix()}${dateStr}.csv`); // one file per day, all sensors
+        const dateStr = getTimezoneTimestamp().slice(0, 10);
+        const file = path.join(RAW_LOG_DIR, `${routePrefix()}${dateStr}.csv`);
         const isNew = !fs.existsSync(file);
         if (isNew || file !== rawLogCurrentFile) { rawLogCounter = RAW_LOG_COUNTER_START; rawLogCurrentFile = file; }
         else { rawLogCounter += RAW_LOG_COUNTER_STEP; }
@@ -481,7 +408,7 @@ function appendRawLog(sensorId, row) {
             gpsLat, gpsLon,
         ].join(',') + '\n';
 
-        fs.appendFileSync(file, isNew ? thresholdConfigBanner() + RAW_LOG_HEADER + line : line);
+        fs.appendFileSync(file, isNew ? RAW_LOG_HEADER + line : line);
     } catch (e) { console.error('[raw_log] append failed:', e.message); }
 }
 
@@ -495,7 +422,6 @@ const pool = new Pool({
     password: process.env.PG_PASSWORD || 'uabams123',
 });
 
-// ── Email (impact alert notifications) ─────────────────────────────────────
 const nodemailer = require('nodemailer');
 const transporter = nodemailer.createTransport({
     host: process.env.SMTP_HOST,
@@ -504,10 +430,8 @@ const transporter = nodemailer.createTransport({
     auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
 });
 
-// ── Notification config (emails + thresholds + cooldown) ──────────────────
 async function loadNotifyEmails() {
     try {
-        // Try to get from database
         const result = await pool.query(
             `SELECT emails, min_severity, cooldown_sec, enabled 
              FROM notification_config LIMIT 1`
@@ -524,7 +448,6 @@ async function loadNotifyEmails() {
     } catch (e) {
         console.error('[notify] DB load error, falling back to JSON:', e.message);
     }
-    // Fallback: read from JSON file (migration path)
     const NOTIFY_FILE = path.join(__dirname, 'notify_emails.json');
     try {
         if (fs.existsSync(NOTIFY_FILE)) {
@@ -550,7 +473,6 @@ async function saveNotifyEmails(cfg) {
         console.log('[notify] Config saved to DB');
     } catch (e) {
         console.error('[notify] DB save error, falling back to JSON:', e.message);
-        // Fallback to JSON
         const NOTIFY_FILE = path.join(__dirname, 'notify_emails.json');
         fs.writeFileSync(NOTIFY_FILE, JSON.stringify(cfg, null, 2));
     }
@@ -619,9 +541,6 @@ app.use(cors());
 app.use(express.json({limit: '15mb'}));
 app.use(express.static(path.join(__dirname, '../client')));
 
-// ── PostgreSQL schema init ────────────────────────────────────────────────
-// NOTE: sensor/device_id columns are TEXT — no schema change needed to add
-// new sensors. Just add them to SENSORS[] above.
 let pgReady = false; 
 
 async function initDB() {
@@ -684,7 +603,6 @@ async function initDB() {
 }
 initDB();
 
-// ── Row → camelCase normaliser ──────────────────────────────────────────
 function normImpact(r) {
     return {
         timestamp:  r.timestamp, sensor: r.sensor, severity: r.severity,
@@ -711,7 +629,6 @@ function normMonitoring(r) {
     };
 }
 
-// ── DB clock anchor ─────────────────────────────────────────────────────
 let _dbLatestTs = null;
 async function getDBNow() {
     try {
@@ -729,12 +646,10 @@ async function getDBNow() {
 }
 setInterval(() => getDBNow(), 30000);
 
-// ── MQTT ──────────────────────────────────────────────────────────────────
 let lastDataTimestamp = null;
 let mqttConnected     = false;
 const mqttClient = mqtt.connect(`mqtt://${process.env.MQTT_HOST}:${process.env.MQTT_PORT}`);
 
-// ── Health parser (legacy text protocol) ───────────────────────────────────
 function parseHealthMessage(msgStr) {
     const get = pattern => {
         const m = msgStr.match(pattern);
@@ -750,7 +665,6 @@ function parseHealthMessage(msgStr) {
         timestamp: new Date().toISOString(),
         raw: msgStr.trim()
     };
-    // Generic per-sensor health parse: "ADXL345 S1: OK", "ADXL345 PIVOT: OK", etc.
     SENSORS.forEach(s => {
         const re = new RegExp(`ADXL345\\s+${s.id}\\s*:\\s*(OK|FAIL)`, 'i');
         health[s.healthKey] = get(re);
@@ -758,12 +672,6 @@ function parseHealthMessage(msgStr) {
     return health;
 }
 
-// ═════════════════════════════════════════════════════════════════════════
-// ── P-class thresholds (persisted) ─────────────────────────────────────────
-// Axle (left/right) thresholds — unchanged file/shape/endpoints so every
-// existing consumer (events.js, acceleration-analysis.js, operator-dashboard.js,
-// acceleration-km.js LC thresholds) keeps working exactly as before.
-// ═════════════════════════════════════════════════════════════════════════
 const THRESHOLDS_FILE = path.join(__dirname, 'thresholds.json');
 function loadThresholds() {
     try {
@@ -778,8 +686,6 @@ function saveThresholds(t) {
 let pClassThresholds = loadThresholds();
 console.log('[thresholds] Loaded:', pClassThresholds);
 
-// ★ PIVOT CHANGE — separate threshold set + file for the pivot sensor, since
-// pivot sees fewer/smaller peaks than the axle sensors and needs its own bands.
 const PIVOT_THRESHOLDS_FILE = path.join(__dirname, 'thresholds_pivot.json');
 const AXIS_THRESHOLDS_FILE = path.join(__dirname, 'thresholds_axis.json');
 const DEFAULT_AXIS_THRESHOLD = { p1Min: 5, p1Max: 10, p2Min: 10, p2Max: 20, p3Min: 20 };
@@ -808,28 +714,10 @@ function savePivotThresholds(t) {
 let pivotClassThresholds = loadPivotThresholds();
 console.log('[thresholds] Pivot loaded:', pivotClassThresholds);
 
-// ★ PIVOT CHANGE — picks the right threshold set for a given sensor id
 function thresholdsFor(sensorId) {
     return sensorId === 'pivot' ? pivotClassThresholds : pClassThresholds;
 }
 
-// Shared "# Threshold Configuration: ..." banner line, prepended to every
-// generated report (raw log, impact-event CSV, km-wise CSV) so each file is
-// self-documenting about which limits classified its readings, without
-// having to cross-reference thresholds.json/axis_limits.json separately.
-// Reads the live in-memory config at call time, not load time, so it always
-// reflects whatever was active when that specific report/file was written.
-function thresholdConfigBanner() {
-    const fmt = t => `P1:${t.p1Min}G,P2:${t.p2Min}G,P3:${t.p3Min}G(Min)`;
-    const axle  = fmt(pClassThresholds);
-    const pivot = fmt(pivotClassThresholds);
-    return `# Threshold Configuration — AXLE ${axle} | PIVOT ${pivot}\n`;
-}
-
-// ★ PIVOT CHANGE — getPClass/getSeverity now take sensorId so pivot impacts
-// are classified against pivotClassThresholds instead of the axle bands.
-// Call sites that don't care about sensor (none should remain) still work
-// since thresholdsFor(undefined) falls back to the axle set.
 function getPClass(peakG, sensorId) {
     if (peakG == null) return null;
     const t = thresholdsFor(sensorId);
@@ -847,7 +735,6 @@ function getSeverity(peakG, sensorId) {
     return 'LOW';
 }
 
-// ── Axle threshold endpoints (unchanged shape/paths) ───────────────────────
 app.get('/api/thresholds', (req, res) => res.json(pClassThresholds));
 
 app.post('/api/thresholds', (req, res) => {
@@ -869,7 +756,6 @@ app.delete('/api/thresholds', (req, res) => {
     res.json({ success: true, thresholds: pClassThresholds });
 });
 
-// ★ PIVOT CHANGE — pivot threshold endpoints, mirror the axle ones above
 app.get('/api/thresholds/pivot', (req, res) => res.json(pivotClassThresholds));
 
 app.post('/api/thresholds/pivot', (req, res) => {
@@ -919,13 +805,8 @@ app.delete('/api/thresholds/axis', (req, res) => {
     res.json({ success: true, thresholds: axisThresholds });
 });
 
-// GET full config — { generic: {x,y,z}, a1: {x,y,z}, a2: {x,y,z} }, each
-// axis leaf is now { p1, p2, p3 } (was a single number pre-band).
 app.get('/api/axis-limits', (req, res) => res.json(axisLimitsConfig));
 
-// POST { unit: 'generic'|'a1'|'a2', axis: 'x'|'y'|'z', band: 'p1'|'p2'|'p3', value: number }
-// Sets exactly one axis's one band, same "any reading >= value crosses the
-// limit" semantics as /api/thresholds — no list, no tags.
 app.post('/api/axis-limits', (req, res) => {
     const { unit, axis, band, value } = req.body || {};
     if (!['generic', 'a1', 'a2'].includes(unit))
@@ -945,8 +826,6 @@ app.post('/api/axis-limits', (req, res) => {
     res.json({ success: true, axisLimits: axisLimitsConfig });
 });
 
-// DELETE — clears any user-saved values and resets every axis back to the
-// 2g default (matches /api/thresholds's DELETE-resets-to-default behavior)
 app.delete('/api/axis-limits', (req, res) => {
     axisLimitsConfig = defaultAxisLimitsShape();
     saveAxisLimitsToFile(axisLimitsConfig);
@@ -955,7 +834,6 @@ app.delete('/api/axis-limits', (req, res) => {
     res.json({ success: true, axisLimits: axisLimitsConfig });
 });
 
-// ── Notification endpoints ──────────────────────────────────────────────────
 app.get('/api/notify-emails', async (req, res) => {
     try {
         const cfg = await loadNotifyEmails();
@@ -976,7 +854,7 @@ app.post('/api/notify-emails', async (req, res) => {
     };
     try {
         await saveNotifyEmails(newCfg);
-        notifyConfig = newCfg; // update in-memory
+        notifyConfig = newCfg;
         console.log('[notify] Config updated:', JSON.stringify(newCfg));
         io.emit('notify-config-changed', newCfg);
         res.json({ success: true, notifyConfig: newCfg });
@@ -986,37 +864,13 @@ app.post('/api/notify-emails', async (req, res) => {
     }
 });
 
-// ── Last health status ───────────────────────────────────────────────────
 let lastHealthStatus = null;
 let totalDistanceM = 0;
 let speedDistanceM = 0;
-let lastSpeedFixAt = null; // Date.now() of the most recent GPS fix — drives the 'speed' health key
+let lastSpeedFixAt = null;
 let lastGpsCoord   = null;
-let lastGpsFixAt   = 0; // Date.now() of the most recent GPS fix — drives the 'gps' health key
+let lastGpsFixAt   = 0;
 
-// BUG FIX: totalDistanceM previously only advanced via Haversine distance
-// between consecutive GPS fixes, gated to d >= 5m to reject position-noise
-// jitter. At this system's actual fix rate (roughly every 1-3s) real but
-// slow-speed movement (walking pace, bench testing, low-speed running)
-// produces per-fix hops well under 5m — so every single hop got discarded
-// as "noise" and totalDistanceM stayed at 0 forever, even with a valid,
-// moving GPS fix. Switched to speed x elapsed-time integration, which
-// accumulates continuously regardless of how small each individual GPS
-// step is, using the GPS module's own speed reading (also more stable at
-// low speed than differencing two nearby, jittery lat/lng fixes).
-function accumulateDistance(speedKmh, now) {
-    if (lastGpsCoord?.fixAt) {
-        const elapsedS = (now - lastGpsCoord.fixAt) / 1000;
-        // Guard against a stale/huge gap (e.g. reconnect after minutes offline)
-        // producing a bogus multi-km jump from one speed sample.
-        if (elapsedS > 0 && elapsedS < 30) {
-            const avgSpeedKmh = ((speedKmh ?? 0) + (lastGpsCoord.speedKmh ?? 0)) / 2;
-            totalDistanceM += avgSpeedKmh * (1000 / 3600) * elapsedS;
-        }
-    }
-}
-
-// ── computeStats ──────────────────────────────────────────────────────────
 async function computeStats(hours = 24) {
     const dbNow  = await getDBNow();
     const isnow = DateTime.fromJSDate(dbNow).setZone(TIMEZONE);
@@ -1053,8 +907,6 @@ async function computeStats(hours = 24) {
                 maxPeak:           parseFloat(row.max_peak),
                 avgPeak:           parseFloat(row.avg_peak),
                 lastPeak:          lastDoc ? (lastDoc.peak_g || 0) : 0,
-                // ★ PIVOT CHANGE — pass lastDoc.sensor so a pivot last-peak is
-                // classified against pivotClassThresholds, not the axle bands
                 lastPeakClass:     lastDoc ? (lastDoc.p_class || getPClass(lastDoc.peak_g, lastDoc.sensor) || '—') : '—',
                 lastPeakTimestamp: lastDoc ? lastDoc.timestamp : null,
                 lastPeakSensor:    lastDoc ? lastDoc.sensor    : null,
@@ -1082,7 +934,6 @@ async function computeStats(hours = 24) {
         maxPeak:            peaks.length ? Math.max(...peaks) : 0,
         avgPeak:            peaks.length ? peaks.reduce((a,b) => a+b,0) / peaks.length : 0,
         lastPeak:           lastDoc ? (lastDoc.peak_g || 0) : 0,
-        // ★ PIVOT CHANGE — same sensor-aware fix for the JSON fallback path
         lastPeakClass:      lastDoc ? (getPClass(lastDoc.peak_g, lastDoc.sensor) || '—') : '—',
         lastPeakTimestamp:  lastDoc ? lastDoc.timestamp : null,
         lastPeakSensor:     lastDoc ? lastDoc.sensor    : null,
@@ -1103,7 +954,6 @@ app.get('/api/impacts/stats', async (req, res) => {
     }
 });
 
-// ── GET /api/latest/sensor — now generic over all registered sensors ──────
 app.get('/api/latest/sensor', async (req, res) => {
     try {
         const result = {};
@@ -1132,7 +982,6 @@ app.get('/api/latest/sensor', async (req, res) => {
             }
         }
 
-        // Fallback: use peaksLog for any sensor still null
         if (SENSOR_IDS.some(id => !result[id])) {
             const sorted = [...peaksLog].sort((a,b) => b.timestamp.localeCompare(a.timestamp));
             for (const p of sorted) {
@@ -1157,7 +1006,6 @@ app.get('/api/latest/sensor', async (req, res) => {
 
 app.get('/api/latest/health', (req, res) => res.json(lastHealthStatus));
 
-// ── GET /api/history/sensor ───────────────────────────────────────────────
 app.get('/api/history/sensor', async (req, res) => {
     const limit = Math.min(parseInt(req.query.limit) || 100, 500);
     try {
@@ -1185,7 +1033,6 @@ app.get('/api/history/sensor', async (req, res) => {
     res.json([]);
 });
 
-// ── GET /api/history/distance-chart — generic, returns one array per sensor
 app.get('/api/history/distance-chart', async (req, res) => {
     try {
         if (!pgReady) {
@@ -1216,7 +1063,6 @@ app.get('/api/history/distance-chart', async (req, res) => {
 
         const grouped = {};
         SENSOR_IDS.forEach(id => { grouped[id] = r.rows.filter(d => d.sensor === id); });
-        // Also include 'left'/'right' aliases for legacy frontend compatibility
         res.json(grouped);
     } catch (e) {
         console.error('/api/history/distance-chart error:', e.message);
@@ -1293,7 +1139,6 @@ app.get('/api/historical/graph/:hours', async (req, res) => {
             ORDER BY timestamp ASC LIMIT 6000
         `, [timeLimit]);
 
-        // Bucket by second, one column per registered sensor (accel1/accel2/accel3/...)
         const buckets = {};
         r.rows.forEach(doc => {
             const sec = new Date(doc.timestamp).toISOString().slice(0, 19);
@@ -1313,14 +1158,6 @@ app.get('/api/historical/graph/:hours', async (req, res) => {
 });
 
 app.get('/api/realtime/status', (req, res) => {
-    // receiving_data used to require a message within the last 10s, which
-    // flickered to "Offline" on the UI during any normal gap between
-    // hardware readings longer than that — even while the bridge itself
-    // was fully connected and healthy. It just mirrors the MQTT bridge's
-    // connection state instead: Live means "connected to the bridge",
-    // Offline means "the bridge connection is actually down". (Second
-    // time fixing this — PR #13 was based on pre-fix dev and silently
-    // reverted it on merge, since this line had no textual conflict.)
     const now = Date.now();
     const mostRecentSensorSeen = Math.max(0, ...Object.values(sensorLastSeen));
     const tcpReceivingData = mostRecentSensorSeen > 0 && (now - mostRecentSensorSeen) < SENSOR_TIMEOUT_MS;
@@ -1333,8 +1170,6 @@ app.get('/api/realtime/status', (req, res) => {
         time_since_last:    effectiveLastData ? Math.floor((now - effectiveLastData) / 1000) : null
     });
 });
-
-// ── Management Dashboard APIs ─────────────────────────────────────────────
 
 app.get('/api/management/sensor-chart', async (req, res) => {
     const hours = Math.min(parseInt(req.query.hours) || 24, 168);
@@ -1367,11 +1202,7 @@ app.get('/api/management/sensor-chart', async (req, res) => {
     }
 });
 
-// ── GET /api/acceleration/channels — generic, keys named lv/ll/rv/rl/pv/pl…
-// Convention: two-letter prefix per sensor slot (l=left,r=right,p=pivot,4th=q…)
-// then v (vertical, from y) / l (lateral, from x).
 const CHANNEL_PREFIX = { left: 'l', right: 'r', pivot: 'p' };
-// For any future sensor not in this map, falls back to first letter of id.
 function channelPrefixFor(id) {
     return CHANNEL_PREFIX[id] || id[0];
 }
@@ -1422,7 +1253,6 @@ app.get('/api/acceleration/channels', async (req, res) => {
     }
 });
 
-// ── GET /api/management/sensor-chart-recent — generic, one key per sensor id
 app.get('/api/management/sensor-chart-recent', async (_req, res) => {
     try {
         const cutoff = new Date(Date.now() - 2 * 60000).toISOString();
@@ -1479,7 +1309,6 @@ app.get('/api/latest/gps', async (_req, res) => {
     }
 });
 
-// ── GET /api/management/active-sensors — generic over SENSOR_IDS ──────────
 app.get('/api/management/active-sensors', async (req, res) => {
     try {
         const cutoff10s = new Date(Date.now() - 10 * 1000).toISOString();
@@ -1497,7 +1326,7 @@ app.get('/api/management/active-sensors', async (req, res) => {
         res.json({
             count: onlineSensors.length, total_known: sensors.length,
             online: onlineSensors, last_known: knownSensors, last_seen: lastSeen,
-            registered_sensors: SENSOR_IDS   // full list, incl. never-seen ones
+            registered_sensors: SENSOR_IDS
         });
     } catch (e) {
         console.error('/api/management/active-sensors error:', e.message);
@@ -1564,20 +1393,26 @@ app.get('/api/monitoring/all', async (req, res) => {
     }
 });
 
-// ── RCI endpoints — unchanged, left-sensor is still the calibrated reference
+function rciSensorFilter(s) {
+    return ['left', 'right', 'pivot'].includes(s) ? s : null;
+}
+
 app.get('/api/rci/average', async (req, res) => {
-    const days = Math.min(parseInt(req.query.days) || 1, 365);
+    const days   = Math.min(parseInt(req.query.days) || 1, 365);
+    const sensor = rciSensorFilter(req.query.sensor);
     try {
         const dbNow  = await getDBNow();
         const cutoff = new Date(dbNow.getTime() - days * 86400000).toISOString();
+        const params = sensor ? [cutoff, sensor] : [cutoff];
         const r = await pool.query(`
             SELECT rms_v FROM realtime_data
-            WHERE timestamp >= $1 AND sensor = 'left' AND rms_v IS NOT NULL
-        `, [cutoff]);
-        if (!r.rows.length) return res.json({ avgRms: null, sampleCount: 0 });
+            WHERE timestamp >= $1 AND rms_v IS NOT NULL
+            ${sensor ? 'AND sensor = $2' : ''}
+        `, params);
+        if (!r.rows.length) return res.json({ avgRms: null, sampleCount: 0, sensor: sensor || 'all' });
         const sum = r.rows.reduce((acc, row) => acc + parseFloat(row.rms_v || 0), 0);
         const avgRms = sum / r.rows.length;
-        res.json({ avgRms: parseFloat(avgRms.toFixed(4)), sampleCount: r.rows.length });
+        res.json({ avgRms: parseFloat(avgRms.toFixed(4)), sampleCount: r.rows.length, sensor: sensor || 'all' });
     } catch (e) {
         console.error('/api/rci/average error:', e.message);
         res.status(500).json({ error: e.message, avgRms: null });
@@ -1586,6 +1421,7 @@ app.get('/api/rci/average', async (req, res) => {
 
 app.get('/api/rci/timeseries', async (req, res) => {
     const period = (req.query.period || '24h').toLowerCase();
+    const sensor = rciSensorFilter(req.query.sensor);
     let hours, truncUnit, maxPoints;
     if      (period === '7d')  { hours = 7  * 24; truncUnit = 'hour';    maxPoints = 168;  }
     else if (period === '30d') { hours = 30 * 24; truncUnit = '4 hours'; maxPoints = 180;  }
@@ -1605,23 +1441,25 @@ app.get('/api/rci/timeseries', async (req, res) => {
             upperBound = dbNow.toISOString();
         }
 
+        const params = sensor ? [truncUnit, cutoff, upperBound, maxPoints, sensor] : [truncUnit, cutoff, upperBound, maxPoints];
         const r = await pool.query(`
             SELECT date_trunc($1, timestamp AT TIME ZONE 'Asia/Kolkata') AS bucket,
                    AVG(rms_v) AS avg_rms_v, COUNT(*) AS sample_count
             FROM realtime_data
-            WHERE sensor = 'left' AND rms_v IS NOT NULL AND rms_v > 0
+            WHERE rms_v IS NOT NULL AND rms_v > 0
               AND timestamp >= $2 AND timestamp < $3
+              ${sensor ? 'AND sensor = $5' : ''}
             GROUP BY bucket ORDER BY bucket DESC LIMIT $4
-        `, [truncUnit, cutoff, upperBound, maxPoints]);
+        `, params);
 
-        if (!r.rows.length) return res.json({ period, freq_hz: 100, points: [], sampleCount: 0 });
+        if (!r.rows.length) return res.json({ period, sensor: sensor || 'all', freq_hz: 100, points: [], sampleCount: 0 });
 
         const points = r.rows.map(row => ({
             timestamp: row.bucket,
             rms_v_g:   parseFloat(parseFloat(row.avg_rms_v).toFixed(5)),
             n:         parseInt(row.sample_count)
         }));
-        res.json({ period, freq_hz: 100, points, sampleCount: points.length });
+        res.json({ period, sensor: sensor || 'all', freq_hz: 100, points, sampleCount: points.length });
     } catch (e) {
         console.error('/api/rci/timeseries error:', e.message);
         res.status(500).json({ error: e.message, points: [] });
@@ -1645,7 +1483,6 @@ app.get('/health', async (req, res) => {
     }
 });
 
-// ── Map endpoints ────────────────────────────────────────────────────────
 app.get('/api/map/events', async (req, res) => {
     try {
         if (!pgReady) return res.json([]);
@@ -1749,7 +1586,6 @@ app.get('/api', (req, res) => {
     });
 });
 
-// ── WebSocket ─────────────────────────────────────────────────────────────
 io.on('connection', async (socket) => {
     console.log('Client connected:', socket.id);
     try {
@@ -1784,9 +1620,6 @@ io.on('connection', async (socket) => {
     socket.on('disconnect', () => console.log('Client disconnected:', socket.id));
 });
 
-// ═════════════════════════════════════════════════════════════════════════
-// ── MQTT handler ────────────────────────────────────────────────────────
-// ═════════════════════════════════════════════════════════════════════════
 mqttClient.on('error', err => { console.error('MQTT error:', err.message); mqttConnected = false; });
 mqttClient.on('close', ()  => { console.warn('MQTT closed'); mqttConnected = false; });
 
@@ -1808,15 +1641,8 @@ mqttClient.on('connect', () => {
     });
 });
 
-// ── Rolling per-sensor magnitude window, used to compute gForce the same
-// way peak is computed: max(sqrt(x²+y²+z²)) over a trailing time window —
-// rather than just the instantaneous magnitude of the latest sample.
-// Shared by the binary-packet and MQTT-text handlers below, which (unlike
-// AccelWindow's raw-sample boards) only ever get one x/y/z reading per
-// message, so the "window" has to be built up across messages instead of
-// across samples within one message.
-const GFORCE_WINDOW_MS = 250; // matches AccelWindow/ACCEL_WINDOW_MS cadence
-const gForceWindows = {}; // { sensorId: [{ t, mag }, ...] }
+const GFORCE_WINDOW_MS = 250;
+const gForceWindows = {};
 function windowedGForce(sensorId, x, y, z) {
     const now = Date.now();
     const mag = Math.sqrt(x**2 + y**2 + z**2);
@@ -1826,7 +1652,6 @@ function windowedGForce(sensorId, x, y, z) {
     return Math.max(...buf.map(s => s.mag));
 }
 
-// ── Shared helper: process one sensor's 68-byte binary reading, generic ────
 async function handleBinarySensorPacket(sensorMeta, message, timestamp) {
     const sensorId = sensorMeta.id;
 
@@ -1850,17 +1675,12 @@ async function handleBinarySensorPacket(sensorMeta, message, timestamp) {
 
     const lat    = +(latRaw / 1e6).toFixed(6);
     const lng    = +(lonRaw / 1e6).toFixed(6);
-    // gForce uses the same definition as peak — max magnitude over a
-    // trailing window — computed in software from this sensor's recent
-    // readings, rather than the instantaneous sqrt(x²+y²+z²) of this sample.
     const gForce = windowedGForce(sensorId, x, y, z);
-
 
     console.log(`[binary] [${sensorId}]: Ax=${x.toFixed(4)} Ay=${y.toFixed(4)} Az=${z.toFixed(4)} gForce=${gForce.toFixed(4)} PEAK=${peak.toFixed(4)} GPS=${lat},${lng} SAT=${sats}`);
 
     sensorLastSeen[sensorId] = Date.now();
 
-    // Health — generic across all registered sensors
     const now = Date.now();
     const inferredHealth = Object.assign({}, lastHealthStatus || {}, {
         w5500: 'OK', phyLink: 'OK', tcp: 'OK', spi1: 'OK', usart2: 'OK',
@@ -1872,13 +1692,17 @@ async function handleBinarySensorPacket(sensorMeta, message, timestamp) {
     lastHealthStatus = inferredHealth;
     io.emit('system-health', inferredHealth);
 
-    // GPS — only sensor "left" is treated as the reference GPS source, same as before
     if (sensorId === 'left' && lat && lng) {
+        if (lastGpsCoord) {
+            const dLat = (lat - lastGpsCoord.lat) * Math.PI / 180;
+            const dLon = (lng - lastGpsCoord.lng) * Math.PI / 180;
+            const a    = Math.sin(dLat/2)**2 + Math.cos(lastGpsCoord.lat * Math.PI/180) * Math.cos(lat * Math.PI/180) * Math.sin(dLon/2)**2;
+            const d    = 6371000 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            if (d >= 5 && d < 500) totalDistanceM += d;
+        }
         const speedKmh = +(speedMs * 0.036).toFixed(2);
-        const nowMs = Date.now();
-        accumulateDistance(speedKmh, nowMs);
-        lastGpsCoord = { lat, lng, speedKmh, fixAt: nowMs };
-        lastGpsFixAt = nowMs;
+        lastGpsCoord = { lat, lng, speedKmh };
+        lastGpsFixAt = Date.now();
         io.emit('gps-data', { lat, lng, speedKmh, totalDistanceM, timestamp });
         if (pgReady) {
             pool.query('INSERT INTO rm_gps (timestamp, lat, lng, speed_kmh, total_distance_m) VALUES ($1,$2,$3,$4,$5)',
@@ -1886,7 +1710,6 @@ async function handleBinarySensorPacket(sensorMeta, message, timestamp) {
         }
     }
 
-    // Store readings — device_id/sensor = sensorId, generic
     if (pgReady) {
         pool.query(
             `INSERT INTO monitoring_data
@@ -1905,11 +1728,8 @@ async function handleBinarySensorPacket(sensorMeta, message, timestamp) {
 
     appendRawLog(sensorId, { timestamp, sensor: sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak });
 
-    // Impact detection — generic, works for any registered sensor
     const peakVal = peak || gForce;
-    if (peakVal > impactDetectionThreshold()) {
-        // ★ PIVOT CHANGE — pass sensorId through so pivot classifies against
-        // pivotClassThresholds instead of the axle bands
+    if (peakVal > impactDetectionThreshold() || crossesAxisLimit(sensorId, x, y)) {
         const pClass   = getPClass(peakVal, sensorId);
         const severity = getSeverity(peakVal, sensorId);
         const impact   = {
@@ -1934,12 +1754,10 @@ async function handleBinarySensorPacket(sensorMeta, message, timestamp) {
             ).catch(e => console.error('events insert:', e.message));
         }
         io.emit('new-impact', impact);
-        // ── Email alert trigger ──────────────────────────────────────────────
         maybeSendImpactEmail(impact);
         computeStats(24).then(stats => io.emit('stats-update', stats)).catch(() => {});
     }
 
-    // Real-time broadcast, respecting per-sensor ODR decimation
     if (shouldEmit(sensorId)) {
         io.emit('accelerometer-data', { sensor: sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, timestamp });
     } else {
@@ -1956,7 +1774,6 @@ mqttClient.on('message', async (topic, message) => {
 
         const pktType = message[0];
 
-        // EVENT packet (fixed type 0x03, unaffected by SENSORS registry)
         if (pktType === 0x03 && message.length === 15) {
             const ts     = message.readUInt32LE(1);
             const s1_mag = message.readFloatLE(5);
@@ -1966,14 +1783,12 @@ mqttClient.on('message', async (topic, message) => {
             return;
         }
 
-        // Generic sensor packet — matched against SENSORS registry by packetType byte
         const sensorMeta = sensorByPacketType(pktType);
         if (sensorMeta && message.length === 68) {
             await handleBinarySensorPacket(sensorMeta, message, timestamp);
             return;
         }
 
-        // ── Legacy text path (health / GPS / older firmware) ──────────────
         const msgStr = message.toString();
         console.log(`Raw: ${msgStr.substring(0, 200)}`);
 
@@ -1998,10 +1813,16 @@ mqttClient.on('message', async (topic, message) => {
                 const speedCms = spdM ? parseFloat(spdM[1]) : 0;
                 const speedKmh = +(speedCms * 0.036).toFixed(2);
 
-                const nowMs = Date.now();
-                accumulateDistance(speedKmh, nowMs);
-                lastGpsCoord = { lat, lng, speedKmh, fixAt: nowMs };
-                lastGpsFixAt = nowMs;
+                if (lastGpsCoord) {
+                    const R    = 6371000;
+                    const dLat = (lat - lastGpsCoord.lat) * Math.PI / 180;
+                    const dLon = (lng - lastGpsCoord.lng) * Math.PI / 180;
+                    const a    = Math.sin(dLat/2)**2 + Math.cos(lastGpsCoord.lat * Math.PI/180) * Math.cos(lat * Math.PI/180) * Math.sin(dLon/2)**2;
+                    const d    = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+                    if (d >= 5 && d < 500) totalDistanceM += d;
+                }
+                lastGpsCoord = { lat, lng, speedKmh };
+                lastGpsFixAt = Date.now();
                 io.emit('gps-data', { lat, lng, speedKmh, totalDistanceM, timestamp });
                 if (pgReady) {
                     pool.query('INSERT INTO rm_gps (timestamp, lat, lng, speed_kmh, total_distance_m) VALUES ($1,$2,$3,$4,$5)',
@@ -2012,7 +1833,6 @@ mqttClient.on('message', async (topic, message) => {
             if (topic === 'adj/datalogger/sensors/gps' || topic.includes('gps')) return;
         }
 
-        // Match topic to a registered sensor generically
         const sensorMetaFromTopic = SENSORS.find(s => s.topicMatch(topic));
         if (!sensorMetaFromTopic) return;
         const sensorSide = sensorMetaFromTopic.id;
@@ -2048,9 +1868,6 @@ mqttClient.on('message', async (topic, message) => {
         const fs   = fsm   ? parseInt(fsm[1])      : null;
         const win  = winm  ? parseInt(winm[1])     : null;
 
-        // gForce uses the same definition as peak — max magnitude over a
-        // trailing window — computed in software from this sensor's recent
-        // readings, rather than the instantaneous sqrt(x²+y²+z²) of this sample.
         const gForce = windowedGForce(sensorSide, x, y, z);
         console.log(`Parsed [${sensorSide}]: x=${x} y=${y} z=${z} peak=${peak} gForce=${gForce.toFixed(4)}`);
 
@@ -2071,9 +1888,7 @@ mqttClient.on('message', async (topic, message) => {
         }
 
         const peakVal = peak || gForce;
-        if (peakVal > impactDetectionThreshold()) {
-            // ★ PIVOT CHANGE — pass sensorSide through so pivot classifies
-            // against pivotClassThresholds instead of the axle bands
+        if (peakVal > impactDetectionThreshold() || crossesAxisLimit(sensorSide, x, y)) {
             const pClass    = getPClass(peakVal, sensorSide);
             const severity  = getSeverity(peakVal, sensorSide);
             const impact    = {
@@ -2101,7 +1916,6 @@ mqttClient.on('message', async (topic, message) => {
             }
 
             io.emit('new-impact', impact);
-            // ── Email alert trigger ──────────────────────────────────────────────
             maybeSendImpactEmail(impact);
             console.log(`IMPACT: ${peakVal.toFixed(3)}g (${severity}) on ${sensorSide}`);
             computeStats(24).then(stats => {
@@ -2122,36 +1936,21 @@ mqttClient.on('message', async (topic, message) => {
     }
 });
 
-// ── Start — single port: HTTP + binary GPS multiplexed ────────────────────
 const PORT         = process.env.PORT        || 5000;
 const GPS_BOARD_IP = process.env.GPS_BOARD_IP || '192.168.1.200';
 const PKT_SIZE     = 14;
 const SYNC0 = 0xAA, SYNC1 = 0x55;
 
-// ═════════════════════════════════════════════════════════════════════════
-// ── Raw-accel TCP ingestion (left/right/pivot hardware, new simplified
-// packet format) — same multiplexed-TCP pattern as the GPS board above,
-// disambiguated by its own SYNC marker (0xAB 0x56 vs GPS's 0xAA 0x55).
-// Unlike the old firmware (packetType 0x01/0x02/0x04 in SENSORS[] above),
-// these boards only send raw X/Y/Z per sample — RMS/SD/P2P/Peak/fs are
-// computed here in software from a rolling window of samples.
-// ═════════════════════════════════════════════════════════════════════════
-// IP -> sensor id. These 4 boards are assumed to replace the old left/right
-// hardware (not run concurrently with it) — see the packetType 0x01/0x02
-// MQTT path above, which is left in place but will collide on the same
-// device_id if that old hardware is ever reconnected.
 const ACCEL_SENSOR_IPS = {
-    '192.168.1.201': 'left',   // ACCEL-1
-    '192.168.1.202': 'right',  // ACCEL-2
-    '192.168.1.203': 'pivot',  // ACCEL-3
-    '192.168.1.204': 'aux',    // ACCEL-4
+    '192.168.1.201': 'left',
+    '192.168.1.202': 'right',
+    '192.168.1.203': 'pivot',
+    '192.168.1.204': 'aux',
 };
 const ACCEL_PKT_SIZE  = 16;
 const ACCEL_SYNC0 = 0xAB, ACCEL_SYNC1 = 0x56;
-const ACCEL_WINDOW_MS = 250; // stats computed once per this many ms, per sensor — matches GPS's ~4/sec fix rate
+const ACCEL_WINDOW_MS = 250;
 
-// Which axis is "vertical" vs "lateral" per sensor — confirmed against
-// physical mounting: Y is vertical, X is lateral.
 const ACCEL_AXIS_MAP = {
     left:  { vertical: 'y', lateral: 'x' },
     right: { vertical: 'y', lateral: 'x' },
@@ -2173,13 +1972,19 @@ function crc16Ccitt(buf) {
 
 function processGpsFix(lat, lng, speedKmh) {
     const timestamp = getTimezoneTimestamp();
-    const nowMs = Date.now();
-    accumulateDistance(speedKmh, nowMs);
-    lastGpsCoord = { lat, lng, speedKmh, fixAt: nowMs };
-    lastGpsFixAt = nowMs;
+    if (lastGpsCoord) {
+        const R    = 6371000;
+        const dLat = (lat - lastGpsCoord.lat) * Math.PI / 180;
+        const dLon = (lng - lastGpsCoord.lng) * Math.PI / 180;
+        const a    = Math.sin(dLat / 2) ** 2 + Math.cos(lastGpsCoord.lat * Math.PI / 180) * Math.cos(lat * Math.PI / 180) * Math.sin(dLon / 2) ** 2;
+        const d    = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+        if (d >= 5 && d < 500) totalDistanceM += d;
+    }
+    lastGpsCoord = { lat, lng, speedKmh };
+    lastGpsFixAt = Date.now();
     if (lastSpeedFixAt) {
     const dtSec = (lastGpsFixAt - lastSpeedFixAt) / 1000;
-    speedDistanceM += (speedKmh / 3.6) * dtSec;   // km/h → m/s, × elapsed seconds
+    speedDistanceM += (speedKmh / 3.6) * dtSec;
     }
     lastSpeedFixAt = lastGpsFixAt;
     io.emit('gps-data', { lat, lng, speedKmh, totalDistanceM, speedDistanceM ,timestamp });
@@ -2229,14 +2034,13 @@ function handleGpsSocket(socket, firstChunk) {
     socket.on('error', e  => console.log(`[GPS-TCP] error: ${e.message}`));
 }
 
-// ── Per-connection windowed stats accumulator for the raw-accel boards ─────
 class AccelWindow {
     constructor(sensorId) {
         this.sensorId = sensorId;
         const axes = ACCEL_AXIS_MAP[sensorId] || { vertical: 'z', lateral: 'x' };
         this.verticalAxis = axes.vertical;
         this.lateralAxis  = axes.lateral;
-        this.samples = []; // { x, y, z }
+        this.samples = [];
         this.windowStart = Date.now();
     }
     add(x, y, z) { this.samples.push({ x, y, z }); }
@@ -2257,8 +2061,6 @@ class AccelWindow {
         const peak = Math.max(...magnitudes);
         const stats = {
             x: last.x, y: last.y, z: last.z,
-            // gForce mirrors peak (windowed max magnitude across this
-            // window's samples) rather than just the last sample's magnitude.
             gForce: peak,
             rmsV: rms(vert), rmsL: rms(lat),
             sdV: sd(vert),   sdL: sd(lat),
@@ -2274,10 +2076,6 @@ class AccelWindow {
     }
 }
 
-// ── Shared helper: process one raw-accel window's computed stats ───────────
-// Mirrors handleBinarySensorPacket's generic tail (health/DB/impact/broadcast)
-// but skips GPS handling — these boards don't carry GPS, that's the separate
-// GPS-TCP path above.
 async function processRawAccelReading(sensorMeta, stats, timestamp) {
     const sensorId = sensorMeta.id;
     const { x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, fs, windowMs } = stats;
@@ -2314,7 +2112,7 @@ async function processRawAccelReading(sensorMeta, stats, timestamp) {
     appendRawLog(sensorId, { timestamp, sensor: sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, fs, window_ms: windowMs });
 
     const peakVal = peak || gForce;
-    if (peakVal > impactDetectionThreshold()) {
+    if (peakVal > impactDetectionThreshold()|| crossesAxisLimit(sensorId, x, y)) {
         const pClass   = getPClass(peakVal, sensorId);
         const severity = getSeverity(peakVal, sensorId);
         const impact   = {
@@ -2340,15 +2138,11 @@ async function processRawAccelReading(sensorMeta, stats, timestamp) {
             ).catch(e => console.error('events insert:', e.message));
         }
         io.emit('new-impact', impact);
-        // ── Email alert trigger ──────────────────────────────────────────────
         maybeSendImpactEmail(impact);
         console.log(`IMPACT: ${peakVal.toFixed(3)}g (${severity}) on ${sensorId}`);
         computeStats(24).then(s => io.emit('stats-update', s)).catch(() => {});
     }
 
-    // ODR decimation assumes a 200Hz base rate — the raw-accel TCP path is
-    // already rate-limited by AccelWindow (one flush per ACCEL_WINDOW_MS),
-    // so there's nothing left to decimate; always emit every window.
     io.emit('accelerometer-data', { sensor: sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, timestamp });
 }
 
@@ -2442,15 +2236,6 @@ tcpMux.listen(PORT, () => {
 });
 tcpMux.on('error', e => console.error(`[MUX] error: ${e.message}`));
 
-// ── Optional HTTPS listener — separate port, plain `app` only (no GPS/accel
-// binary multiplexing, unlike the HTTP port above). Added solely so the
-// browser dashboard can be served from a secure context: some browser APIs
-// (e.g. File System Access's showDirectoryPicker(), used by the "Save
-// Folder" export feature) are unavailable over plain HTTP on a LAN IP,
-// only over HTTPS or localhost. Self-signed — browsers show a one-time
-// warning to click through per machine. Entirely additive: the HTTP+binary
-// port above is untouched and still the primary/default way to reach the
-// server, including for the WPF app and any hardware ingest.
 const HTTPS_PORT = process.env.HTTPS_PORT || 5443;
 const httpsCertPath = path.join(__dirname, 'certs', 'cert.pem');
 const httpsKeyPath  = path.join(__dirname, 'certs', 'key.pem');
@@ -2472,7 +2257,6 @@ if (fs.existsSync(httpsCertPath) && fs.existsSync(httpsKeyPath)) {
     console.log('[HTTPS] certs/cert.pem or certs/key.pem not found — HTTPS listener not started (HTTP-only).');
 }
 
-// ── Reset endpoint ────────────────────────────────────────────────────────
 app.post('/api/reset', async (req, res) => {
     const saveToDb = req.body?.saveToDb === true;
     console.log(`[reset] requested — saveToDb=${saveToDb}`);
@@ -2497,7 +2281,79 @@ app.post('/api/reset', async (req, res) => {
     }
 });
 
-// ── Test-report CSV — now includes every registered sensor column set ─────
+async function buildTestRunReportCsv(from, to) {
+    const r = await pool.query(`
+        SELECT rd.sensor, rd.timestamp, rd.x, rd.y, rd.z, rd.g_force,
+               rd.rms_v, rd.rms_l, rd.sd_v, rd.sd_l, rd.p2p_v, rd.p2p_l, rd.peak,
+               g.lat, g.lng, g.speed_kmh, g.total_distance_m
+        FROM realtime_data rd
+        LEFT JOIN LATERAL (
+            SELECT lat, lng, speed_kmh, total_distance_m
+            FROM rm_gps WHERE timestamp <= rd.timestamp
+            ORDER BY timestamp DESC LIMIT 1
+        ) g ON true
+        WHERE rd.timestamp >= $1 AND rd.timestamp <= $2
+        ORDER BY rd.timestamp ASC
+    `, [new Date(from).toISOString(), new Date(to).toISOString()]);
+
+    const bySensor = {};
+    SENSOR_IDS.forEach(id => { bySensor[id] = r.rows.filter(row => row.sensor === id); });
+    const n = Math.max(...SENSOR_IDS.map(id => bySensor[id].length), 0);
+
+    const fromDt  = new Date(from);
+    const toDt    = new Date(to);
+    const durSec  = Math.round((toDt - fromDt) / 1000);
+    const durStr  = `${Math.floor(durSec/60)}m ${durSec%60}s`;
+
+    const lines = [];
+    lines.push(`# TEST RUN REPORT`);
+    lines.push(`# Date,${fromDt.toLocaleDateString('en-IN')}`);
+    lines.push(`# Start Time,${fromDt.toLocaleTimeString('en-IN')}`);
+    lines.push(`# End Time,${toDt.toLocaleTimeString('en-IN')}`);
+    lines.push(`# Duration,${durStr}`);
+    lines.push(`# Total Windows,${n}`);
+    SENSORS.forEach(s => lines.push(`# ${s.label} Readings,${bySensor[s.id].length}`));
+    lines.push('#');
+
+    const header = ['Window#', 'Timestamp'];
+    SENSORS.forEach((s, i) => {
+        const tag = `S${i + 1}`;
+        header.push(
+            `${tag}_Ax(g)`, `${tag}_Ay(g)`, `${tag}_Az(g)`, `${tag}_GForce(g)`,
+            `${tag}_RMS_V`, `${tag}_RMS_L`, `${tag}_SD_V`, `${tag}_SD_L`,
+            `${tag}_P2P_V`, `${tag}_P2P_L`, `${tag}_Peak(g)`
+        );
+    });
+    header.push('Lat', 'Lng', 'Speed_kmh', 'Distance_m');
+    lines.push(header.join(','));
+
+    const fmt  = (v, d=4) => v != null ? (+v).toFixed(d) : '';
+    const fmt6 = (v)      => v != null ? (+v).toFixed(6) : '';
+
+    for (let i = 0; i < n; i++) {
+        const row = [i + 1];
+        let ts = '', gps = null;
+        SENSORS.forEach(s => {
+            const rec = bySensor[s.id][i] || {};
+            if (!ts && rec.timestamp) ts = rec.timestamp.toString();
+            if (!gps && rec.lat != null) gps = rec;
+            row.push(
+                fmt(rec.x), fmt(rec.y), fmt(rec.z), fmt(rec.g_force),
+                fmt(rec.rms_v), fmt(rec.rms_l), fmt(rec.sd_v), fmt(rec.sd_l),
+                fmt(rec.p2p_v), fmt(rec.p2p_l), fmt(rec.peak)
+            );
+        });
+        row.splice(1, 0, ts);
+        gps = gps || {};
+        row.push(fmt6(gps.lat), fmt6(gps.lng), fmt(gps.speed_kmh, 2), fmt(gps.total_distance_m, 1));
+        lines.push(row.join(','));
+    }
+
+    const filename = `${routePrefix()}test_report_${fromDt.toISOString().slice(0,10)}_${fromDt.toTimeString().slice(0,8).replace(/:/g,'-')}.csv`;
+    const csvBody  = lines.join('\r\n');
+    return { csvBody, filename, rowCount: n };
+}
+
 app.get('/api/test-report/csv', async (req, res) => {
     const { from, to } = req.query;
     if (!from || !to) return res.status(400).send('from and to required');
@@ -2505,76 +2361,7 @@ app.get('/api/test-report/csv', async (req, res) => {
     try {
         if (!pgReady) return res.status(503).send('DB not ready');
 
-        const r = await pool.query(`
-            SELECT rd.sensor, rd.timestamp, rd.x, rd.y, rd.z, rd.g_force,
-                   rd.rms_v, rd.rms_l, rd.sd_v, rd.sd_l, rd.p2p_v, rd.p2p_l, rd.peak,
-                   g.lat, g.lng, g.speed_kmh, g.total_distance_m
-            FROM realtime_data rd
-            LEFT JOIN LATERAL (
-                SELECT lat, lng, speed_kmh, total_distance_m
-                FROM rm_gps WHERE timestamp <= rd.timestamp
-                ORDER BY timestamp DESC LIMIT 1
-            ) g ON true
-            WHERE rd.timestamp >= $1 AND rd.timestamp <= $2
-            ORDER BY rd.timestamp ASC
-        `, [new Date(from).toISOString(), new Date(to).toISOString()]);
-
-        const bySensor = {};
-        SENSOR_IDS.forEach(id => { bySensor[id] = r.rows.filter(row => row.sensor === id); });
-        const n = Math.max(...SENSOR_IDS.map(id => bySensor[id].length), 0);
-
-        const fromDt  = new Date(from);
-        const toDt    = new Date(to);
-        const durSec  = Math.round((toDt - fromDt) / 1000);
-        const durStr  = `${Math.floor(durSec/60)}m ${durSec%60}s`;
-
-        const lines = [];
-        lines.push(`# TEST RUN REPORT`);
-        lines.push(thresholdConfigBanner().replace(/\n$/, ''));
-        lines.push(`# Date,${fromDt.toLocaleDateString('en-IN')}`);
-        lines.push(`# Start Time,${fromDt.toLocaleTimeString('en-IN')}`);
-        lines.push(`# End Time,${toDt.toLocaleTimeString('en-IN')}`);
-        lines.push(`# Duration,${durStr}`);
-        lines.push(`# Total Windows,${n}`);
-        SENSORS.forEach(s => lines.push(`# ${s.label} Readings,${bySensor[s.id].length}`));
-        lines.push('#');
-
-        const header = ['Window#', 'Timestamp'];
-        SENSORS.forEach((s, i) => {
-            const tag = `S${i + 1}`;
-            header.push(
-                `${tag}_Ax(g)`, `${tag}_Ay(g)`, `${tag}_Az(g)`, `${tag}_GForce(g)`,
-                `${tag}_RMS_V`, `${tag}_RMS_L`, `${tag}_SD_V`, `${tag}_SD_L`,
-                `${tag}_P2P_V`, `${tag}_P2P_L`, `${tag}_Peak(g)`
-            );
-        });
-        header.push('Lat', 'Lng', 'Speed_kmh', 'Distance_m');
-        lines.push(header.join(','));
-
-        const fmt  = (v, d=4) => v != null ? (+v).toFixed(d) : '';
-        const fmt6 = (v)      => v != null ? (+v).toFixed(6) : '';
-
-        for (let i = 0; i < n; i++) {
-            const row = [i + 1];
-            let ts = '', gps = null;
-            SENSORS.forEach(s => {
-                const rec = bySensor[s.id][i] || {};
-                if (!ts && rec.timestamp) ts = rec.timestamp.toString();
-                if (!gps && rec.lat != null) gps = rec;
-                row.push(
-                    fmt(rec.x), fmt(rec.y), fmt(rec.z), fmt(rec.g_force),
-                    fmt(rec.rms_v), fmt(rec.rms_l), fmt(rec.sd_v), fmt(rec.sd_l),
-                    fmt(rec.p2p_v), fmt(rec.p2p_l), fmt(rec.peak)
-                );
-            });
-            row.splice(1, 0, ts); // insert timestamp after Window#
-            gps = gps || {};
-            row.push(fmt6(gps.lat), fmt6(gps.lng), fmt(gps.speed_kmh, 2), fmt(gps.total_distance_m, 1));
-            lines.push(row.join(','));
-        }
-
-        const filename = `${routePrefix()}test_report_${fromDt.toISOString().slice(0,10)}_${fromDt.toTimeString().slice(0,8).replace(/:/g,'-')}.csv`;
-        const csvBody  = lines.join('\r\n');
+        const { csvBody, filename } = await buildTestRunReportCsv(from, to);
 
         const archiveName = filename.replace(/\.csv$/, `_${archiveTimestamp()}.csv`);
         try {
@@ -2591,15 +2378,11 @@ app.get('/api/test-report/csv', async (req, res) => {
     }
 });
 
-// ── Shared impact-CSV builder — used by both the manual export endpoint
-// and the automatic background archiver below, so the two never drift.
 const IMPACT_CSV_HEADERS = ['timestamp', 'sensor', 'severity', 'p_class', 'peak_g', 'rmsV', 'rmsL', 'sdV', 'sdL', 'p2pV', 'p2pL', 'x', 'y', 'z', 'fs', 'window_ms', 'distance_m', 'lat', 'lng'];
 function buildImpactCsv(docs) {
     const fmt = v => (v == null || v === undefined) ? '' : String(v);
     const rows = docs.map(d => [
         fmt(d.timestamp), fmt(d.sensor), fmt(d.severity),
-        // ★ PIVOT CHANGE — pass d.sensor so a fallback classification (when
-        // p_class wasn't stored) uses the right threshold set for pivot rows
         fmt(d.p_class || getPClass(d.peak_g, d.sensor) || ''),
         fmt(d.peak_g != null ? (+d.peak_g).toFixed(6) : ''),
         fmt(d.rmsV != null ? (+d.rmsV).toFixed(3) : ''), fmt(d.rmsL != null ? (+d.rmsL).toFixed(3) : ''),
@@ -2610,15 +2393,12 @@ function buildImpactCsv(docs) {
         fmt(d.distance_m != null ? d.distance_m : '0'),
         fmt(d.lat != null ? (+d.lat).toFixed(6) : ''), fmt(d.lng != null ? (+d.lng).toFixed(6) : '')
     ].join(','));
-    return thresholdConfigBanner() + [IMPACT_CSV_HEADERS.join(','), ...rows].join('\n');
+    return [IMPACT_CSV_HEADERS.join(','), ...rows].join('\n');
 }
 
-// ── Automatic impact-report archiving — writes a CSV of new impact events
-// to IMPACT_REPORTS_DIR on a timer, with no user interaction required.
-// The manual "Export CSV" button below still works exactly as before and
-// is completely independent of this.
+// ── Automatic impact-report archiving — hourly, disconnect-safe ───────────
 const AUTO_IMPACT_ARCHIVE_STATE_FILE = path.join(__dirname, 'auto_impact_archive_state.json');
-const AUTO_IMPACT_ARCHIVE_INTERVAL_MS = parseInt(process.env.AUTO_IMPACT_ARCHIVE_INTERVAL_MS, 10) || 3600000; // default: every 1 hour
+const AUTO_IMPACT_ARCHIVE_INTERVAL_MS = parseInt(process.env.AUTO_IMPACT_ARCHIVE_INTERVAL_MS, 10) || 3600000;
 
 function loadAutoImpactArchiveState() {
     try {
@@ -2627,7 +2407,7 @@ function loadAutoImpactArchiveState() {
             if (saved.lastArchivedAt) return saved.lastArchivedAt;
         }
     } catch (e) { console.error('auto_impact_archive_state.json read error:', e.message); }
-    return null; // first run — will fall back to "since server start"
+    return null;
 }
 function saveAutoImpactArchiveState(lastArchivedAt) {
     try { fs.writeFileSync(AUTO_IMPACT_ARCHIVE_STATE_FILE, JSON.stringify({ lastArchivedAt }, null, 2)); }
@@ -2638,13 +2418,17 @@ let autoImpactArchiveCursor = loadAutoImpactArchiveState() || new Date().toISOSt
 
 async function autoArchiveImpactEvents() {
     if (!pgReady) return;
+    if (!geonixCurrentlyMounted()) {
+        console.warn('[auto-archive] Impact events: Geonix drive not mounted — skipping this cycle, will retry next hour.');
+        return;
+    }
     try {
         const since = autoImpactArchiveCursor;
         const r = await pool.query(
             `SELECT * FROM accelerometer_events WHERE timestamp > $1 ORDER BY timestamp ASC`,
             [since]
         );
-        if (!r.rows.length) return; // nothing new — don't write an empty file every hour
+        if (!r.rows.length) return;
 
         const docs = r.rows.map(normImpact);
         const csv  = buildImpactCsv(docs);
@@ -2660,11 +2444,119 @@ async function autoArchiveImpactEvents() {
         console.error('[auto-archive] Failed:', e.message);
     }
 }
-// Kick off shortly after startup (once DB/reports dirs are ready), then repeat on the interval.
 setTimeout(autoArchiveImpactEvents, 10000);
 setInterval(autoArchiveImpactEvents, AUTO_IMPACT_ARCHIVE_INTERVAL_MS);
 
-// ── Impacts CSV export — unchanged, already sensor-agnostic ────────────────
+// ── Automatic raw-session backup — hourly, disconnect-safe ─────────────────
+const AUTO_KMWISE_ARCHIVE_STATE_FILE = path.join(__dirname, 'auto_kmwise_archive_state.json');
+const AUTO_KMWISE_ARCHIVE_INTERVAL_MS = parseInt(process.env.AUTO_KMWISE_ARCHIVE_INTERVAL_MS, 10) || 3600000;
+
+function loadAutoKmWiseArchiveState() {
+    try {
+        if (fs.existsSync(AUTO_KMWISE_ARCHIVE_STATE_FILE)) {
+            const saved = JSON.parse(fs.readFileSync(AUTO_KMWISE_ARCHIVE_STATE_FILE, 'utf8'));
+            if (saved.lastArchivedAt) return saved.lastArchivedAt;
+        }
+    } catch (e) { console.error('auto_kmwise_archive_state.json read error:', e.message); }
+    return null;
+}
+function saveAutoKmWiseArchiveState(lastArchivedAt) {
+    try { fs.writeFileSync(AUTO_KMWISE_ARCHIVE_STATE_FILE, JSON.stringify({ lastArchivedAt }, null, 2)); }
+    catch (e) { console.error('auto_kmwise_archive_state.json write error:', e.message); }
+}
+
+let autoKmWiseArchiveCursor = loadAutoKmWiseArchiveState() || '1970-01-01T00:00:00.000Z';
+
+const KMWISE_CSV_HEADERS = [
+    'id','timestamp','device_id','x_axis','y_axis','z_axis','g_force',
+    'rms_v','rms_l','sd_v','sd_l','p2p_v','p2p_l','peak','fs','window_ms','distance_m'
+];
+function buildKmWiseCsv(rows) {
+    const body = rows.map(r => KMWISE_CSV_HEADERS.map(k => {
+        const v = r[k];
+        return v == null ? '' : (v instanceof Date ? v.toISOString() : v);
+    }).join(','));
+    return [KMWISE_CSV_HEADERS.join(','), ...body].join('\n');
+}
+
+async function autoArchiveKmWise() {
+    if (!pgReady) return;
+    if (!geonixCurrentlyMounted()) {
+        console.warn('[auto-archive] Session backup: Geonix drive not mounted — skipping this cycle, will retry next hour.');
+        return;
+    }
+    try {
+        const since = autoKmWiseArchiveCursor;
+        const r = await pool.query(
+            `SELECT * FROM monitoring_data WHERE timestamp > $1 ORDER BY timestamp ASC`,
+            [since]
+        );
+        if (!r.rows.length) return;
+
+        const csv = buildKmWiseCsv(r.rows);
+        const newestTs = r.rows[r.rows.length - 1].timestamp;
+        const isFirstRun = since === '1970-01-01T00:00:00.000Z';
+        const tag = isFirstRun ? 'full_history' : 'hourly';
+        const archiveName = `${routePrefix()}raw_monitoring_backup_${tag}_${archiveTimestamp()}.csv`;
+
+        fs.writeFileSync(path.join(RAW_MONITORING_BACKUP_DIR, archiveName), csv);
+        console.log(`[auto-archive] Wrote ${r.rows.length} km-wise record(s) → ${archiveName}`);
+
+        autoKmWiseArchiveCursor = newestTs;
+        saveAutoKmWiseArchiveState(autoKmWiseArchiveCursor);
+    } catch (e) {
+        console.error('[auto-archive] Session backup archive failed:', e.message);
+    }
+}
+setTimeout(autoArchiveKmWise, 12000);
+setInterval(autoArchiveKmWise, AUTO_KMWISE_ARCHIVE_INTERVAL_MS);
+
+// ── Automatic test-run report — hourly, disconnect-safe ────────────────────
+const AUTO_TESTRUN_ARCHIVE_STATE_FILE = path.join(__dirname, 'auto_testrun_archive_state.json');
+const AUTO_TESTRUN_ARCHIVE_INTERVAL_MS = parseInt(process.env.AUTO_TESTRUN_ARCHIVE_INTERVAL_MS, 10) || 3600000;
+
+function loadAutoTestrunArchiveState() {
+    try {
+        if (fs.existsSync(AUTO_TESTRUN_ARCHIVE_STATE_FILE)) {
+            const saved = JSON.parse(fs.readFileSync(AUTO_TESTRUN_ARCHIVE_STATE_FILE, 'utf8'));
+            if (saved.lastArchivedAt) return saved.lastArchivedAt;
+        }
+    } catch (e) { console.error('auto_testrun_archive_state.json read error:', e.message); }
+    return null;
+}
+function saveAutoTestrunArchiveState(lastArchivedAt) {
+    try { fs.writeFileSync(AUTO_TESTRUN_ARCHIVE_STATE_FILE, JSON.stringify({ lastArchivedAt }, null, 2)); }
+    catch (e) { console.error('auto_testrun_archive_state.json write error:', e.message); }
+}
+
+let autoTestrunArchiveCursor = loadAutoTestrunArchiveState() || '1970-01-01T00:00:00.000Z';
+
+async function autoArchiveTestRunReport() {
+    if (!pgReady) return;
+    if (!geonixCurrentlyMounted()) {
+        console.warn('[auto-archive] Test-run report: Geonix drive not mounted — skipping this cycle, will retry next hour.');
+        return;
+    }
+    try {
+        const from = autoTestrunArchiveCursor;
+        const to   = new Date().toISOString();
+
+        const { csvBody, filename, rowCount } = await buildTestRunReportCsv(from, to);
+        if (!rowCount) { autoTestrunArchiveCursor = to; saveAutoTestrunArchiveState(to); return; }
+
+        const archiveName = filename.replace(/\.csv$/, `_${archiveTimestamp()}.csv`);
+        fs.writeFileSync(path.join(TESTRUN_REPORTS_DIR, archiveName), csvBody);
+        console.log(`[auto-archive] Wrote test-run report (${rowCount} windows) → ${archiveName}`);
+
+        autoTestrunArchiveCursor = to;
+        saveAutoTestrunArchiveState(to);
+    } catch (e) {
+        console.error('[auto-archive] Test-run report archive failed:', e.message);
+    }
+}
+setTimeout(autoArchiveTestRunReport, 14000);
+setInterval(autoArchiveTestRunReport, AUTO_TESTRUN_ARCHIVE_INTERVAL_MS);
+
 app.get('/api/impacts/export/csv', async (req, res) => {
     const { from, to, hours } = req.query;
 
@@ -2695,11 +2587,22 @@ app.get('/api/impacts/export/csv', async (req, res) => {
 
     console.log(`[csv] Exporting ${docs.length} records (${label})`);
 
-    // Was a drifted inline duplicate of buildImpactCsv() — same columns, but
-    // missing the threshold-configuration banner every other report now
-    // carries. Routed through the shared builder so this endpoint, the
-    // manual export elsewhere, and the auto-archiver can never drift again.
-    const csv = buildImpactCsv(docs);
+    const headers = ['timestamp', 'sensor', 'severity', 'p_class', 'peak_g', 'rmsV', 'rmsL', 'sdV', 'sdL', 'p2pV', 'p2pL', 'x', 'y', 'z', 'fs', 'window_ms', 'distance_m', 'lat', 'lng'];
+    const fmt = v => (v == null || v === undefined) ? '' : String(v);
+    const rows = docs.map(d => [
+        fmt(d.timestamp), fmt(d.sensor), fmt(d.severity),
+        fmt(d.p_class || getPClass(d.peak_g, d.sensor) || ''),
+        fmt(d.peak_g != null ? (+d.peak_g).toFixed(6) : ''),
+        fmt(d.rmsV != null ? (+d.rmsV).toFixed(3) : ''), fmt(d.rmsL != null ? (+d.rmsL).toFixed(3) : ''),
+        fmt(d.sdV != null ? (+d.sdV).toFixed(3) : ''), fmt(d.sdL != null ? (+d.sdL).toFixed(3) : ''),
+        fmt(d.p2pV != null ? (+d.p2pV).toFixed(3) : ''), fmt(d.p2pL != null ? (+d.p2pL).toFixed(3) : ''),
+        fmt(d.x != null ? (+d.x).toFixed(3) : ''), fmt(d.y != null ? (+d.y).toFixed(3) : ''), fmt(d.z != null ? (+d.z).toFixed(3) : ''),
+        fmt(d.fs != null ? d.fs : ''), fmt(d.window_ms != null ? d.window_ms : ''),
+        fmt(d.distance_m != null ? d.distance_m : '0'),
+        fmt(d.lat != null ? (+d.lat).toFixed(6) : ''), fmt(d.lng != null ? (+d.lng).toFixed(6) : '')
+    ].join(','));
+
+    const csv = [headers.join(','), ...rows].join('\n');
     const filename = `${routePrefix()}impact_report_${label}.csv`;
 
     const archiveName = filename.replace(/\.csv$/, `_${archiveTimestamp()}.csv`);
@@ -2714,13 +2617,6 @@ app.get('/api/impacts/export/csv', async (req, res) => {
     res.send(csv);
 });
 
-// ── KM-wise report archive — client already builds the CSV; just persist it ──
-// Called both by the manual "Export CSV" button and by the frontend's silent
-// auto-save (on hardware disconnect, or on page/tab/system close via
-// sendBeacon — see acceleration-km.js). Both paths write into the exact same
-// KMWISE_REPORTS_DIR — the only difference is the filename tag, so manual and
-// auto-saved reports are easy to tell apart on disk without living in
-// separate folders.
 app.post('/api/reports/km-wise', express.json({ limit: '15mb' }), (req, res) => {
     const { csv, reportDate, auto, reason } = req.body || {};
     if (!csv || typeof csv !== 'string') {
@@ -2739,10 +2635,322 @@ app.post('/api/reports/km-wise', express.json({ limit: '15mb' }), (req, res) => 
     }
 });
 
-// ── ODR config endpoints — now generic over SENSORS registry ──────────────
-// GET returns both the live values and the persisted per-sensor defaults,
-// so the frontend can show/reset against real defaults instead of a
-// hardcoded 100.
+// ═════════════════════════════════════════════════════════════════════════
+// ── Server-side port of acceleration-km.js's REAL km-wise report builder ──
+// ═════════════════════════════════════════════════════════════════════════
+function kmBlocksForLength(lengthM) {
+    const full = Math.floor(lengthM / 200);
+    const rem  = lengthM % 200;
+    const lens = Array(full).fill(200);
+    if (rem > 0) lens.push(rem);
+    return lens;
+}
+function kmSplitRecordsByDistance(docs, kmStart, blockLengths) {
+    let blockStart = kmStart;
+    return blockLengths.map(len => {
+        const blockEnd = blockStart + len;
+        const slice = docs.filter(d => d.distance_m != null && d.distance_m >= blockStart && d.distance_m < blockEnd);
+        blockStart = blockEnd;
+        return slice;
+    });
+}
+function kmMaxVal(arr) {
+    const valid = arr.filter(v => v != null && !isNaN(v));
+    return valid.length ? Math.max(...valid) : null;
+}
+function kmComputeBlock(docs, blkIdx) {
+    const left  = docs.filter(d => d.device_id === 'left');
+    const right = docs.filter(d => d.device_id === 'right');
+    const pivot = docs.filter(d => d.device_id === 'pivot');
+    const pick  = (arr, f) => arr.map(d => d[f]).filter(v => v != null);
+    return {
+        label: `BLK${blkIdx + 1}`,
+        left:  { rmsV: kmMaxVal(pick(left, 'rmsV')),  rmsL: kmMaxVal(pick(left, 'rmsL')),  sdV: kmMaxVal(pick(left, 'sdV')),  sdL: kmMaxVal(pick(left, 'sdL')) },
+        right: { rmsV: kmMaxVal(pick(right, 'rmsV')), rmsL: kmMaxVal(pick(right, 'rmsL')), sdV: kmMaxVal(pick(right, 'sdV')), sdL: kmMaxVal(pick(right, 'sdL')) },
+        pivot: { rmsV: kmMaxVal(pick(pivot, 'rmsV')), rmsL: kmMaxVal(pick(pivot, 'rmsL')), sdV: kmMaxVal(pick(pivot, 'sdV')), sdL: kmMaxVal(pick(pivot, 'sdL')) },
+    };
+}
+function kmGetAxisLimitBand(side, axisLetter) {
+    if (!axisLimitsConfig) return null;
+    const unit = axisLimitUnitForSensor(side);
+    return (axisLimitsConfig[unit] && axisLimitsConfig[unit][axisLetter]) || null;
+}
+function kmClassifyAxisLimitPeak(g, band) {
+    if (g == null || isNaN(g) || !band) return null;
+    const v = Math.abs(g);
+    if (band.p3 != null && v >= +band.p3) return 'P3';
+    if (band.p2 != null && v >= +band.p2) return 'P2';
+    if (band.p1 != null && v >= +band.p1) return 'P1';
+    return null;
+}
+function kmComputePeakDist(docs) {
+    const out = {
+        left:  { V: { P1: 0, P2: 0, P3: 0 }, L: { P1: 0, P2: 0, P3: 0 } },
+        right: { V: { P1: 0, P2: 0, P3: 0 }, L: { P1: 0, P2: 0, P3: 0 } },
+        pivot: { V: { P1: 0, P2: 0, P3: 0 }, L: { P1: 0, P2: 0, P3: 0 } },
+    };
+    for (const d of docs) {
+        const side = d.device_id === 'right' ? 'right' : (d.device_id === 'pivot' ? 'pivot' : 'left');
+        const pV = kmClassifyAxisLimitPeak(d.y_axis, kmGetAxisLimitBand(side, 'y'));
+        const pL = kmClassifyAxisLimitPeak(d.x_axis, kmGetAxisLimitBand(side, 'x'));
+        if (pV) out[side].V[pV]++;
+        if (pL) out[side].L[pL]++;
+    }
+    return out;
+}
+function kmComputeWorstPeaks(docs, kmStart, blockLengths) {
+    const keys  = ['L-LAT', 'L-VERT', 'R-LAT', 'R-VERT', 'P-LAT', 'P-VERT'];
+    const empty = () => Object.fromEntries(keys.map(k => [k, []]));
+    if (!docs || !docs.length) return empty();
+
+    function maxInDocs(slice) {
+        const cur = Object.fromEntries(keys.map(k => [k, null]));
+        for (const d of slice) {
+            const side    = d.device_id === 'right' ? 'right' : (d.device_id === 'pivot' ? 'pivot' : 'left');
+            const latKey  = side === 'left' ? 'L-LAT' : side === 'right' ? 'R-LAT' : 'P-LAT';
+            const vertKey = side === 'left' ? 'L-VERT' : side === 'right' ? 'R-VERT' : 'P-VERT';
+            const lat  = d.x_axis != null ? Math.abs(d.x_axis) : null;
+            const vert = d.y_axis != null ? Math.abs(d.y_axis) : null;
+            if (lat  != null) cur[latKey]  = cur[latKey]  == null ? lat  : Math.max(cur[latKey], lat);
+            if (vert != null) cur[vertKey] = cur[vertKey] == null ? vert : Math.max(cur[vertKey], vert);
+        }
+        return cur;
+    }
+
+    let slices = [];
+    if (kmStart != null && blockLengths && blockLengths.length) {
+        let blockStart = kmStart;
+        for (const len of blockLengths) {
+            const blockEnd = blockStart + len;
+            const slice = docs.filter(d => d.distance_m != null && d.distance_m >= blockStart && d.distance_m < blockEnd);
+            if (slice.length) slices.push(slice);
+            blockStart = blockEnd;
+        }
+    }
+
+    const series = Object.fromEntries(keys.map(k => [k, []]));
+    for (const slice of slices) {
+        const cur = maxInDocs(slice);
+        for (const k of keys) if (cur[k] != null) series[k].push(+cur[k].toFixed(1));
+    }
+
+    const out = empty();
+    for (const k of keys) out[k] = series[k].slice(-10);
+    return out;
+}
+function kmBuildDayCards(docsForDay) {
+    if (!chainagePreview || !chainagePreview.kmLengths || !Object.keys(chainagePreview.kmLengths).length) return null;
+
+    const nums   = Object.keys(chainagePreview.kmLengths).map(Number);
+    const kmNums = chainagePreview.direction === 'DN' ? nums.sort((a, b) => b - a) : nums.sort((a, b) => a - b);
+
+    const cards = [];
+    let cursor  = 0;
+    const maxDistDoc = docsForDay.reduce((m, d) => (d.distance_m != null && d.distance_m > m) ? d.distance_m : m, 0);
+
+    for (const km of kmNums) {
+        const len     = chainagePreview.kmLengths[km] || 1000;
+        const kmStart = cursor;
+        const kmEnd   = cursor + len;
+        const kmDocsSlice = docsForDay.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
+        cursor = kmEnd;
+
+        if (kmDocsSlice.length || maxDistDoc > kmStart) {
+            const blockLengths = kmBlocksForLength(len);
+            const blockSplits  = kmSplitRecordsByDistance(kmDocsSlice, kmStart, blockLengths);
+            const blocks = blockLengths.map((blen, i) => {
+                const c = kmComputeBlock(blockSplits[i] || [], i);
+                c.label = `BLK${i + 1} (${blen}m)`;
+                return c;
+            });
+            const isDn = chainagePreview.direction === 'DN';
+            cards.push({
+                kmFrom: km, kmTo: isDn ? km - 1 : km + 1, kmLengthM: len,
+                blocks,
+                peakDist:   kmComputePeakDist(kmDocsSlice),
+                worstPeaks: kmComputeWorstPeaks(kmDocsSlice, kmStart, blockLengths),
+            });
+        } else if (kmStart >= maxDistDoc && cards.length > 0) {
+            break;
+        }
+    }
+    return cards;
+}
+function kmFmt(v, d = 2) { return (v == null || isNaN(v)) ? '—' : (+v).toFixed(d); }
+
+function buildKmWiseReportCsv(docsForDay, reportDate) {
+    if (!docsForDay.length) return null;
+    const cards = kmBuildDayCards(docsForDay);
+    if (!cards) return null;
+
+    const rows = [];
+    rows.push("Datalogger - Full Day KM Wise Acceleration Report");
+    rows.push(`Date,${reportDate}`);
+    rows.push(`Total Records,${docsForDay.length}`);
+    rows.push(`Generated On,${new Date().toLocaleString()}`);
+    rows.push(`Route Tape,${chainagePreview.sourceFileName}`);
+    rows.push("");
+
+    for (const card of cards) {
+        rows.push(`=== KM ${card.kmFrom} TO ${card.kmTo}${card.kmLengthM ? ` (${card.kmLengthM}m)` : ''} ===`);
+        rows.push("");
+
+        rows.push("BLOCKS SUMMARY");
+        rows.push("LOC,Left RMS V,Left RMS L,Left SD V,Left SD L,Right RMS V,Right RMS L,Right SD V,Right SD L,Pivot RMS V,Pivot RMS L,Pivot SD V,Pivot SD L");
+        card.blocks.forEach(blk => {
+            const l = blk.left || {}, r = blk.right || {}, p = blk.pivot || {};
+            rows.push([
+                blk.label,
+                kmFmt(l.rmsV), kmFmt(l.rmsL), kmFmt(l.sdV, 3), kmFmt(l.sdL, 3),
+                kmFmt(r.rmsV), kmFmt(r.rmsL), kmFmt(r.sdV, 3), kmFmt(r.sdL, 3),
+                kmFmt(p.rmsV), kmFmt(p.rmsL), kmFmt(p.sdV, 3), kmFmt(p.sdL, 3),
+            ].join(','));
+        });
+        rows.push("");
+
+        rows.push("PEAK DISTRIBUTION");
+        const axisLimitNote = side => {
+            const bx = kmGetAxisLimitBand(side, 'x'), by = kmGetAxisLimitBand(side, 'y');
+            if (!bx || !by) return 'not configured';
+            return `V P1=${by.p1 ?? '—'}g P2=${by.p2 ?? '—'}g P3=${by.p3 ?? '—'}g | L P1=${bx.p1 ?? '—'}g P2=${bx.p2 ?? '—'}g P3=${bx.p3 ?? '—'}g`;
+        };
+        rows.push(`Axis Limit Values,Left: ${axisLimitNote('left')}`);
+        rows.push(`,Right: ${axisLimitNote('right')}`);
+        rows.push(`,Pivot: ${axisLimitNote('pivot')}`);
+        rows.push("Band,Left Vertical (V),Left Lateral (L),Right Vertical (V),Right Lateral (L),Pivot Vertical (V),Pivot Lateral (L)");
+        const pd = card.peakDist;
+        ['P1', 'P2', 'P3'].forEach(band => {
+            rows.push([band, pd.left.V[band] || 0, pd.left.L[band] || 0, pd.right.V[band] || 0, pd.right.L[band] || 0, pd.pivot.V[band] || 0, pd.pivot.L[band] || 0].join(','));
+        });
+        rows.push("");
+
+        rows.push("WORST PEAKS (Top 10)");
+        rows.push("Parameter,1,2,3,4,5,6,7,8,9,10");
+        const wp = card.worstPeaks || {};
+        ['L-LAT', 'L-VERT', 'R-LAT', 'R-VERT', 'P-LAT', 'P-VERT'].forEach(param => {
+            const vals = (wp[param] || []).map(v => kmFmt(v, 1));
+            while (vals.length < 10) vals.push('—');
+            rows.push([param, ...vals].join(','));
+        });
+
+        rows.push("");
+        rows.push("");
+    }
+    return rows.join("\n");
+}
+
+// ── Filesystem-truth dedupe for past-day KM-wise reports ──────────────────
+// autoKmWiseArchivedPastDates (below) is a fast-path cache only. This is
+// the real guard: does ANY file for this date already exist in
+// KMWISE_REPORTS_DIR — auto-generated OR manually exported? If so, that
+// day is considered "already saved" and is never written again, no matter
+// what the JSON cursor says, even if the cursor was lost/reset or this is
+// a different/replacement drive that already carries old archives.
+// Matches on "_YYYY-MM-DD_" so it catches both:
+//   NDLS-LJN_KM_Report_2026-07-04_auto_backfill_2026-08-21_09-00-00.csv
+//   NDLS-LJN_KM_Report_2026-07-04_2026-08-21_09-05-00.csv   (manual export)
+function pastDayAlreadyArchived(day) {
+    try {
+        const files = fs.readdirSync(KMWISE_REPORTS_DIR);
+        return files.some(f => f.includes(`_${day}_`) || f.includes(`_${day}.csv`));
+    } catch (e) {
+        console.error('[auto-archive] Could not read KMWISE_REPORTS_DIR for dedupe check:', e.message);
+        return false; // fail open — risk one dupe rather than silently stop backfilling forever
+    }
+}
+
+// ── Automatic KM-wise report ────────────────────────────────────────────
+// PAST days: written exactly once, ever — verified against what's actually
+// on the drive (pastDayAlreadyArchived), not just the JSON cursor. Once a
+// past day has any file for it, it is permanently skipped.
+//
+// TODAY (the live run): regenerated on every single hourly tick, no dedupe
+// check at all, by design — this is the "keep saving every hour regardless
+// of filename" behavior. If the drive disconnects mid-run, this cycle just
+// skips (geonixCurrentlyMounted() gate below); the moment the drive comes
+// back, the very next hourly tick resumes writing "today" normally — no
+// restart needed. Once that calendar day ends, it becomes a "past day" on
+// the next run and falls under the once-only dedupe rule above.
+const AUTO_KMWISE_REPORT_STATE_FILE = path.join(__dirname, 'auto_kmwise_report_state.json');
+const AUTO_KMWISE_REPORT_INTERVAL_MS = parseInt(process.env.AUTO_KMWISE_REPORT_INTERVAL_MS, 10) || 3600000;
+
+function loadAutoKmWiseReportState() {
+    try {
+        if (fs.existsSync(AUTO_KMWISE_REPORT_STATE_FILE)) {
+            const saved = JSON.parse(fs.readFileSync(AUTO_KMWISE_REPORT_STATE_FILE, 'utf8'));
+            if (Array.isArray(saved.archivedPastDates)) return saved.archivedPastDates;
+        }
+    } catch (e) { console.error('auto_kmwise_report_state.json read error:', e.message); }
+    return [];
+}
+function saveAutoKmWiseReportState(archivedPastDates) {
+    try { fs.writeFileSync(AUTO_KMWISE_REPORT_STATE_FILE, JSON.stringify({ archivedPastDates }, null, 2)); }
+    catch (e) { console.error('auto_kmwise_report_state.json write error:', e.message); }
+}
+let autoKmWiseArchivedPastDates = loadAutoKmWiseReportState();
+
+async function autoArchiveKmWiseReport() {
+    if (!pgReady) return;
+    if (!geonixCurrentlyMounted()) {
+        console.warn('[auto-archive] KM-wise report: Geonix drive not mounted — skipping this cycle, will retry next hour.');
+        return;
+    }
+    if (!chainagePreview || !chainagePreview.kmLengths) {
+        console.warn('[auto-archive] KM-wise report skipped: no route tape uploaded yet (upload one via Chainage Preview).');
+        return;
+    }
+    try {
+        const daysR = await pool.query(`
+            SELECT DISTINCT to_char(timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day
+            FROM monitoring_data ORDER BY day ASC
+        `);
+        const todayUtc = new Date().toISOString().slice(0, 10);
+
+        for (const { day } of daysR.rows) {
+            const isToday = day === todayUtc;
+
+            if (!isToday) {
+                // Ground-truth check first — the actual drive contents,
+                // not the JSON cursor. A day with any file already there
+                // (auto or manual) is skipped, permanently.
+                if (pastDayAlreadyArchived(day)) {
+                    if (!autoKmWiseArchivedPastDates.includes(day)) {
+                        autoKmWiseArchivedPastDates.push(day); // heal the cursor cache
+                        saveAutoKmWiseReportState(autoKmWiseArchivedPastDates);
+                    }
+                    continue;
+                }
+                if (autoKmWiseArchivedPastDates.includes(day)) continue; // fast-path skip
+            }
+            // isToday: always falls through — regenerated every hour, no dedupe.
+
+            const dr = await pool.query(`
+                SELECT * FROM monitoring_data
+                WHERE to_char(timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD') = $1
+                ORDER BY timestamp ASC
+            `, [day]);
+            const docs = dr.rows.map(normMonitoring);
+
+            const csvBody = buildKmWiseReportCsv(docs, day);
+            if (!csvBody) continue;
+
+            const tag = isToday ? 'auto_today' : 'auto_backfill';
+            const archiveName = `${routePrefix()}KM_Report_${day}_${tag}_${archiveTimestamp()}.csv`;
+            fs.writeFileSync(path.join(KMWISE_REPORTS_DIR, archiveName), csvBody);
+            console.log(`[auto-archive] Wrote KM-wise report for ${day} (${docs.length} records) → ${archiveName}`);
+
+            if (!isToday) {
+                autoKmWiseArchivedPastDates.push(day);
+                saveAutoKmWiseReportState(autoKmWiseArchivedPastDates);
+            }
+        }
+    } catch (e) {
+        console.error('[auto-archive] KM-wise report failed:', e.message);
+    }
+}
+setTimeout(autoArchiveKmWiseReport, 16000);
+setInterval(autoArchiveKmWiseReport, AUTO_KMWISE_REPORT_INTERVAL_MS);
+
 app.get('/api/odr-config', (req, res) => res.json({ ...odrConfig, defaults: odrStore.defaults }));
 
 const VALID_ODR_HZ = [50, 100, 200];
@@ -2761,8 +2969,6 @@ function parseOdrUpdates(body) {
 app.post('/api/odr-config', (req, res) => {
     const body = req.body || {};
 
-    // setAsDefault: true persists this same payload as the new defaults too
-    // (i.e. "make this the factory default"), instead of just the live value.
     const { updated, error } = parseOdrUpdates(body);
     if (error) return res.status(400).json({ error });
     if (!Object.keys(updated).length) {
@@ -2772,16 +2978,13 @@ app.post('/api/odr-config', (req, res) => {
     Object.assign(odrConfig, updated);
     if (body.setAsDefault) Object.assign(odrStore.defaults, updated);
 
-    SENSORS.forEach(s => { odrCounters[s.id] = 0; }); // reset all so next sample is accepted
+    SENSORS.forEach(s => { odrCounters[s.id] = 0; });
     saveOdrConfig(odrStore);
     console.log('[ODR] Updated →', odrConfig, body.setAsDefault ? '(also saved as default)' : '');
     io.emit('odr-config-changed', odrConfig);
     res.json({ success: true, odrConfig, defaults: odrStore.defaults });
 });
 
-// DELETE resets ODR back to the persisted defaults — either every sensor,
-// or a single one via ?sensor=accel1. It does NOT hardcode 100 Hz; it
-// restores whatever the user last saved as their default.
 app.delete('/api/odr-config', (req, res) => {
     const { sensor } = req.query;
 
@@ -2801,7 +3004,6 @@ app.delete('/api/odr-config', (req, res) => {
     res.json({ success: true, odrConfig, defaults: odrStore.defaults });
 });
 
-// ── Limits config endpoints (unchanged) ─────────────────────────────────
 app.get('/api/limits-config', (req, res) => res.json(limitsConfig));
 
 app.post('/api/limits-config', (req, res) => {
@@ -2814,7 +3016,6 @@ app.post('/api/limits-config', (req, res) => {
     res.json({ success: true, limitsConfig });
 });
 
-// ── Route config endpoints — global origin/destination, prefixed onto every report filename ──
 app.get('/api/route-config', (req, res) => res.json(routeConfig));
 
 app.post('/api/route-config', (req, res) => {
@@ -2827,7 +3028,6 @@ app.post('/api/route-config', (req, res) => {
     res.json({ success: true, routeConfig });
 });
 
-// ── Section metadata endpoints — Railway/Division/Section/Line/Block/Rail LH-RH, written onto every raw_log row ──
 app.get('/api/section-config', (req, res) => res.json(sectionConfig));
 
 app.post('/api/section-config', (req, res) => {
@@ -2848,9 +3048,6 @@ app.post('/api/section-config', (req, res) => {
     res.json({ success: true, sectionConfig });
 });
 
-// ── Chainage preview — parsing helpers ──────────────────────────────────────
-// Row format: KM,Meter,FeatureCode[,Lat,Lon,] — comma-separated, optional
-// trailing comma, some rows only have 3 columns (no GPS anchor).
 function dmsToDecimal(dmsStr) {
     const m = dmsStr.match(/(\d+)°(\d+)'([\d.]+)"?([NSEW])/);
     if (!m) return null;
@@ -2865,7 +3062,7 @@ function parseChainageFile(text) {
     for (const line of text.split(/\r?\n/).map(l => l.trim()).filter(Boolean)) {
         const parts = line.split(',').map(p => p.trim());
         const km = parseInt(parts[0], 10), meter = parseInt(parts[1], 10), featureCode = parseInt(parts[2], 10);
-        if (isNaN(km) || isNaN(meter) || isNaN(featureCode)) continue; // skip header/malformed lines
+        if (isNaN(km) || isNaN(meter) || isNaN(featureCode)) continue;
         let lat = null, lon = null;
         if (parts[3] && parts[4]) { lat = dmsToDecimal(parts[3]); lon = dmsToDecimal(parts[4]); }
         rows.push({ km, meter, featureCode, lat, lon });
@@ -2873,18 +3070,12 @@ function parseChainageFile(text) {
     return rows;
 }
 
-// featureCode === 1 = "KM Post" (confirmed against RDSO Annexure-I/II) — its
-// meter value is taken as the real terminal length of that KM number.
 function deriveKmLengths(rows) {
     const lengths = {};
     for (const r of rows) if (r.featureCode === 1) lengths[r.km] = r.meter;
     return lengths;
 }
 
-// Direction + KM span are read entirely from the uploaded file's own row
-// order — nothing hardcoded. Chainage tapes are laid out in the direction
-// of increasing chainage as walked; if km numbers fall as you go down the
-// file (e.g. 192 → 76) that's a down-line (DN) tape, rising = up-line (UP).
 function deriveRouteDirection(rows) {
     if (!rows.length) return { direction: null, kmFrom: null, kmTo: null };
     const firstKm = rows[0].km;
@@ -2896,9 +3087,6 @@ function deriveRouteDirection(rows) {
     };
 }
 
-// Total real-world span of the tape in metres, using each KM's actual
-// surveyed length (from KM Post markers) where known, falling back to a
-// flat 1000m for any KM the tape didn't include a post for.
 function deriveTotalRouteMeters(rows, kmLengths) {
     if (!rows.length) return 0;
     const { kmFrom, kmTo } = deriveRouteDirection(rows);
@@ -2929,9 +3117,9 @@ app.post('/api/chainage-preview', chainagePreviewUpload.single('file'), (req, re
         uploadedAt: getTimezoneTimestamp(),
         rows,
         kmLengths,
-        direction: routeMeta.direction,       // 'UP' or 'DN', read from the file's own row order
-        kmFrom: routeMeta.kmFrom,             // e.g. 192 — taken directly from the tape, not hardcoded
-        kmTo: routeMeta.kmTo,                 // e.g. 76
+        direction: routeMeta.direction,
+        kmFrom: routeMeta.kmFrom,
+        kmTo: routeMeta.kmTo,
         totalRouteMeters: deriveTotalRouteMeters(rows, kmLengths),
     };
     saveChainagePreview(chainagePreview);
@@ -2945,7 +3133,6 @@ app.delete('/api/chainage-preview', (req, res) => {
     res.json({ success: true });
 });
 
-// ── GET /api/sensors — new: lets frontend discover registered sensors dynamically
 app.get('/api/sensors', (req, res) => {
     res.json(SENSORS.map(s => ({ id: s.id, label: s.label, odrKey: s.odrKey, healthKey: s.healthKey })));
 });

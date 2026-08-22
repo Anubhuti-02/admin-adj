@@ -27,29 +27,21 @@ async function preloadSensorReadings() {
         for (const [side, d] of Object.entries(sides)) {
             if (!d) continue;
 
-            // Northern Central panel (index.html)
+            // Northern Central panel (index.html) — VERT = Y axis, LAT = X
+            // axis. Z is intentionally never used here.
             if (side === 'left') {
-                // Y is vertical, X is lateral — matches ACCEL_AXIS_MAP on the
-                // server. Was previously reading vert from Z and lat from
-                // sqrt(x²+y²), which is wrong.
                 const vert = Math.abs(d.y ?? 0);
                 const lat  = Math.abs(d.x ?? 0);
                 _set('ablVert', vert.toFixed(4) + ' g');
                 _set('ablLat',  lat.toFixed(4)  + ' g');
             }
             if (side === 'right') {
-                // Y is vertical, X is lateral — matches ACCEL_AXIS_MAP on the
-                // server. Was previously reading vert from Z and lat from
-                // sqrt(x²+y²), which is wrong.
                 const vert = Math.abs(d.y ?? 0);
                 const lat  = Math.abs(d.x ?? 0);
                 _set('abrVert', vert.toFixed(4) + ' g');
                 _set('abrLat',  lat.toFixed(4)  + ' g');
             }
             if (side === 'pivot') {
-                // Y is vertical, X is lateral — matches ACCEL_AXIS_MAP on the
-                // server. Was previously reading vert from Z and lat from
-                // sqrt(x²+y²), which is wrong.
                 const vert = Math.abs(d.y ?? 0);
                 const lat  = Math.abs(d.x ?? 0);
                 _set('abpVert', vert.toFixed(4) + ' g');
@@ -158,12 +150,13 @@ async function preloadAlerts() {
 window.preloadGraphHistory = async function(distChart, subplotsObj) {
     try {
         // Only fetch the last 80 points for raw subplots — small, fast query
-        const res  = await fetch(`${PRELOAD_SERVER}/api/history/sensor?limit=80`);
+        const res  = await fetch(`${PRELOAD_SERVER}/api/history/sensor?limit=240`);
         const data = await res.json();
         if (!data.length) return 0;
 
         const left  = data.filter(d => d.sensor === 'left');
         const right = data.filter(d => d.sensor === 'right');
+        const pivot = data.filter(d => d.sensor === 'pivot');
 
         const fillSubplot = (chart, arr, extractFn) => {
             if (!chart) return;
@@ -181,6 +174,9 @@ window.preloadGraphHistory = async function(distChart, subplotsObj) {
             fillSubplot(subplotsObj.s2.x, right, d => d.x ?? 0);
             fillSubplot(subplotsObj.s2.y, right, d => d.y ?? 0);
             fillSubplot(subplotsObj.s2.z, right, d => d.z ?? 9.8);
+            fillSubplot(subplotsObj.s3.x, pivot, d => d.x ?? 0);
+            fillSubplot(subplotsObj.s3.y, pivot, d => d.y ?? 0);
+            fillSubplot(subplotsObj.s3.z, pivot, d => d.z ?? 9.8);
         }
 
         console.log('[preload] Raw subplots pre-filled');

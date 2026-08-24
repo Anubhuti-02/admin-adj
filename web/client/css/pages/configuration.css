@@ -347,6 +347,57 @@ h1 { font-size: 2.5rem; color: #1e293b; margin-bottom: 8px; font-weight: 700; }
     transition: all 0.2s;
 }
 
+/* ── Sampling & Bandpass Configuration (merged from Sampling Frequency page) ── */
+.sf-field-row { display: flex; align-items: center; gap: 8px; }
+.sf-field-row input[type="number"] {
+    font-family: 'Courier New', monospace; font-size: 0.9rem;
+    border: 2px solid #e2e8f0; border-radius: 8px;
+    padding: 8px 10px; width: 100px; text-align: right;
+    color: #1e293b; outline: none; transition: border-color 0.15s;
+}
+.sf-field-row input[type="number"]:focus { border-color: #22c55e; box-shadow: 0 0 0 3px rgba(34,197,94,0.1); }
+.sf-field-unit { font-size: 0.8rem; color: #64748b; }
+
+.sf-filter-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 10px; }
+.sf-filter-label { font-size: 0.8rem; color: #64748b; white-space: nowrap; }
+.sf-filter-label--sampling { margin-left: 12px; }
+.sf-filter-sep { font-size: 0.8rem; color: #94a3b8; }
+.sf-filter-row input[type="number"] {
+    font-family: 'Courier New', monospace; font-size: 0.9rem;
+    border: 2px solid #e2e8f0; border-radius: 8px;
+    padding: 8px 10px; width: 76px; text-align: right;
+    color: #1e293b; outline: none; transition: border-color 0.15s;
+}
+.sf-filter-row input[type="number"]:focus { border-color: #22c55e; box-shadow: 0 0 0 3px rgba(34,197,94,0.1); }
+.sf-sampling-select {
+    font-family: 'Courier New', monospace; font-size: 0.9rem;
+    border: 2px solid #e2e8f0; border-radius: 8px;
+    padding: 8px 10px; color: #1e293b; outline: none;
+    background: #fff; cursor: pointer; transition: border-color 0.15s;
+}
+.sf-sampling-select:focus { border-color: #22c55e; box-shadow: 0 0 0 3px rgba(34,197,94,0.1); }
+
+/* ── Urgent Maintenance Limit table (merged from Sampling Frequency page) ── */
+.table-container { overflow-x: auto; }
+.uml-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 0.85rem; border-radius: 12px; overflow: hidden; }
+.uml-table th {
+    background: linear-gradient(135deg, #22c55e 0%, #16a34a 100%);
+    color: #fff; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.04em; font-size: 0.75rem; padding: 10px 14px; text-align: left;
+}
+.uml-table td { border-bottom: 1px solid #f1f5f9; background: #fff; padding: 10px 14px; }
+.uml-table .row-label { background: #f8fafc; font-weight: 700; color: #1e293b; }
+.uml-table input[type="number"] {
+    font-family: 'Courier New', monospace; width: 76px; font-size: 0.85rem;
+    padding: 6px 8px; border: 2px solid #e2e8f0; border-radius: 8px;
+    color: #1e293b; text-align: right; outline: none;
+}
+.uml-table input[type="number"]:focus { border-color: #22c55e; box-shadow: 0 0 0 3px rgba(34,197,94,0.1); }
+.uml-table input[type="number"][disabled] { background: #f1f5f9; border-color: #e2e8f0; color: #94a3b8; }
+.uml-range-cell { display: flex; align-items: center; gap: 6px; }
+.range-sep { font-size: 0.75rem; color: #94a3b8; font-style: italic; white-space: nowrap; flex-shrink: 0; }
+.table-note { font-size: 0.78rem; color: #64748b; margin-top: 10px; font-style: italic; }
+
 .axis-band input:focus {
     outline: none;
     border-color: #22c55e;

@@ -304,7 +304,7 @@ function loadLimitsConfig() {
     try {
         if (fs.existsSync(LIMITS_CONFIG_FILE)) return JSON.parse(fs.readFileSync(LIMITS_CONFIG_FILE, 'utf8'));
     } catch (e) { console.error('limits_config.json read error:', e.message); }
-    return { uml: null, limitClass: null };
+    return { uml: null, limitClass: null, bandpass: null, sampleDistanceMm: null };
 }
 function saveLimitsConfig(cfg) {
     try { fs.writeFileSync(LIMITS_CONFIG_FILE, JSON.stringify(cfg, null, 2)); }
@@ -2805,9 +2805,16 @@ app.delete('/api/odr-config', (req, res) => {
 app.get('/api/limits-config', (req, res) => res.json(limitsConfig));
 
 app.post('/api/limits-config', (req, res) => {
-    const { uml, limitClass } = req.body;
-    limitsConfig.uml        = uml        ?? null;
-    limitsConfig.limitClass = limitClass ?? null;
+    // Only touches keys actually present in the request body — this endpoint
+    // is now called separately for UML/limitClass (Reset) and for
+    // bandpass/sampleDistanceMm (Sampling & Bandpass save on the merged
+    // Threshold Configuration page), and neither call should wipe the
+    // other's already-saved values.
+    const body = req.body || {};
+    if ('uml'        in body) limitsConfig.uml        = body.uml        ?? null;
+    if ('limitClass' in body) limitsConfig.limitClass = body.limitClass ?? null;
+    if ('bandpass'   in body) limitsConfig.bandpass   = body.bandpass   ?? null;
+    if ('sampleDistanceMm' in body) limitsConfig.sampleDistanceMm = body.sampleDistanceMm ?? null;
     saveLimitsConfig(limitsConfig);
     console.log('[limits] Config updated and saved to limits_config.json');
     io.emit('limits-config-changed', limitsConfig);

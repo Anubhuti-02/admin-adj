@@ -216,8 +216,9 @@ function validateThresholds(prefix, label) {
 }
 
 // ── Save — thresholds (P1/P2/P3) only. Axis limits save independently via
-// their own "Save … Limits" button next to each unit's inputs. ────────────
-async function saveAllConfig() {
+// their own "Save … Limits" button next to each unit's inputs. Called by
+// the page's combined saveAllConfig() below, alongside sampling/bandpass. ─
+async function saveThresholdConfig() {
     const axle  = validateThresholds('', 'Axle');
     if (!axle) return;
     const pivot = validateThresholds('pv-', 'Pivot');
@@ -309,10 +310,135 @@ if (typeof io !== 'undefined') {
     });
 }
 
+// ── Sampling & Bandpass Configuration (merged in from the old standalone
+// Sampling Frequency page) — Sample Distance, per-sensor bandpass filter
+// low/high Hz, and ODR (sampling frequency) for Left (accel1) and Pivot
+// (accel3). Right (accel2) only has a bandpass filter in this layout —
+// its ODR is still set server-side via /api/odr-config's accel2 key, just
+// not exposed as a control here since nothing in the source screenshot
+// showed one for the middle sensor. ─────────────────────────────────────
+const SAMPLING_RATES_HZ = [50, 100, 200];
+
+function populateSamplingSelect(selectEl) {
+    if (!selectEl) return;
+    selectEl.innerHTML = SAMPLING_RATES_HZ.map(hz => `<option value="${hz}">${hz}</option>`).join('');
+}
+
+async function loadSamplingBandpassConfig() {
+    populateSamplingSelect(document.getElementById('a1-sf'));
+    populateSamplingSelect(document.getElementById('a3-sf'));
+
+    try {
+        const res = await fetch('/api/odr-config');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const odr = await res.json();
+        if (odr.accel1 && document.getElementById('a1-sf')) document.getElementById('a1-sf').value = odr.accel1;
+        if (odr.accel3 && document.getElementById('a3-sf')) document.getElementById('a3-sf').value = odr.accel3;
+    } catch (e) {
+        console.warn('[config] Could not load ODR config:', e.message);
+    }
+
+    try {
+        const res = await fetch('/api/limits-config');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const cfg = await res.json();
+
+        if (cfg.sampleDistanceMm != null) {
+            const el = document.getElementById('sampleDistance');
+            if (el) el.value = cfg.sampleDistanceMm;
+        }
+
+        const bp = cfg.bandpass;
+        if (bp) {
+            const setBp = (prefix, key) => {
+                const lowEl  = document.getElementById(`${prefix}-low`);
+                const highEl = document.getElementById(`${prefix}-high`);
+                if (lowEl  && bp[key]?.low  != null) lowEl.value  = bp[key].low;
+                if (highEl && bp[key]?.high != null) highEl.value = bp[key].high;
+            };
+            setBp('a1', 'accel1');
+            setBp('a2', 'accel2');
+            setBp('a3', 'accel3');
+        }
+
+        const uml = cfg.uml;
+        if (uml) {
+            const setUml = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.value = v; };
+            setUml('uml-a1-vert-low',  uml.accel1?.vert?.low);
+            setUml('uml-a1-vert-high', uml.accel1?.vert?.high);
+            setUml('uml-a1-lat-low',   uml.accel1?.lat?.low);
+            setUml('uml-a1-lat-high',  uml.accel1?.lat?.high);
+            setUml('uml-a2-vert-low',  uml.accel2?.vert?.low);
+            setUml('uml-a2-vert-high', uml.accel2?.vert?.high);
+            setUml('uml-a2-lat-low',   uml.accel2?.lat?.low);
+            setUml('uml-a2-lat-high',  uml.accel2?.lat?.high);
+        }
+    } catch (e) {
+        console.warn('[config] Could not load limits-config:', e.message);
+    }
+}
+
+function numOrNull(id) {
+    const el = document.getElementById(id);
+    if (!el) return null;
+    const v = el.value.trim();
+    return v === '' ? null : Number(v);
+}
+
+// Saves Sample Distance + bandpass (all 3 sensors) + ODR (accel1/accel3) +
+// UML (accel1/accel2). Called from the same "Save Configuration" button as
+// the threshold/axis-limit save, so one click persists everything on this page.
+async function saveSamplingBandpassConfig() {
+    try {
+        const odrRes = await fetch('/api/odr-config', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({
+                accel1: numOrNull('a1-sf') || undefined,
+                accel3: numOrNull('a3-sf') || undefined,
+            }),
+        });
+        if (!odrRes.ok) throw new Error(`HTTP ${odrRes.status} on /api/odr-config`);
+
+        const bandpass = {
+            accel1: { low: numOrNull('a1-low'), high: numOrNull('a1-high') },
+            accel2: { low: numOrNull('a2-low'), high: numOrNull('a2-high') },
+            accel3: { low: numOrNull('a3-low'), high: numOrNull('a3-high') },
+        };
+        const uml = {
+            accel1: {
+                vert: { low: numOrNull('uml-a1-vert-low'), high: numOrNull('uml-a1-vert-high') },
+                lat:  { low: numOrNull('uml-a1-lat-low'),  high: numOrNull('uml-a1-lat-high')  },
+            },
+            accel2: {
+                vert: { low: numOrNull('uml-a2-vert-low'), high: numOrNull('uml-a2-vert-high') },
+                lat:  { low: numOrNull('uml-a2-lat-low'),  high: numOrNull('uml-a2-lat-high')  },
+            },
+        };
+        const limRes = await fetch('/api/limits-config', {
+            method:  'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body:    JSON.stringify({ bandpass, uml, sampleDistanceMm: numOrNull('sampleDistance') }),
+        });
+        if (!limRes.ok) throw new Error(`HTTP ${limRes.status} on /api/limits-config`);
+    } catch (e) {
+        showError(`Could not save sampling/bandpass configuration: ${e.message}`);
+        throw e;
+    }
+}
+
+// ── Combined save — one "Save Configuration" button now persists
+// thresholds, axis limits' own buttons aside, plus sampling/bandpass/UML. ──
+async function saveAllConfig() {
+    await saveSamplingBandpassConfig();
+    await saveThresholdConfig();
+}
+
 // ── Expose to HTML onclick handlers ──────────────────────────────────────
 window.saveAxisLimit  = saveAxisLimit;
-window.saveAllConfig  = saveAllConfig;
 window.resetToDefault = resetToDefault;
+window.saveAllConfig  = saveAllConfig;
 
 // ── Start ─────────────────────────────────────────────────────────────────
 loadConfig();
+loadSamplingBandpassConfig();

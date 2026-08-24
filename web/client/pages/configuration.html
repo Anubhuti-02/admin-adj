@@ -166,6 +166,145 @@
                 </div>
             </div>
 
+            <!-- Sampling & Bandpass Configuration -->
+            <div class="threshold-section">
+                <div class="section-title">
+                    <i class="fas fa-wave-square"></i>
+                    <h2>Sampling &amp; Bandpass Configuration</h2>
+                </div>
+
+                <div class="peak-limits-section">
+                    <div class="peak-limits-header">
+                        <h3><i class="fas fa-ruler-horizontal" style="color: #0891b2; margin-right: 8px;"></i>Sample Distance</h3>
+                    </div>
+                    <div class="sf-field-row">
+                        <input type="number" id="sampleDistance" min="0" step="1" placeholder="250">
+                        <span class="sf-field-unit">mm</span>
+                    </div>
+                </div>
+
+                <div class="peak-limits-section">
+                    <div class="peak-limits-header">
+                        <h3><i class="fas fa-microchip" style="color: #0891b2; margin-right: 8px;"></i>Left</h3>
+                        <span style="color: #64748b; font-size: 0.9rem;">Bandpass filter &amp; sampling frequency for Accelerometer 1 (Left).</span>
+                    </div>
+                    <div class="sf-filter-row">
+                        <span class="sf-filter-label">Bandpass filter</span>
+                        <input type="number" id="a1-low" min="0" step="0.1">
+                        <span class="sf-filter-sep">–</span>
+                        <input type="number" id="a1-high" min="0" step="1">
+                        <span class="sf-field-unit">Hz</span>
+                        <span class="sf-filter-label sf-filter-label--sampling">Sampling Frequency</span>
+                        <select id="a1-sf" class="sf-sampling-select"></select>
+                        <span class="sf-field-unit">Hz</span>
+                    </div>
+                </div>
+
+                <div class="peak-limits-section">
+                    <div class="peak-limits-header">
+                        <h3><i class="fas fa-microchip" style="color: #7c3aed; margin-right: 8px;"></i>Right</h3>
+                        <span style="color: #64748b; font-size: 0.9rem;">Bandpass filter for Accelerometer 2 (Right).</span>
+                    </div>
+                    <div class="sf-filter-row">
+                        <span class="sf-filter-label">Bandpass filter</span>
+                        <input type="number" id="a2-low" min="0" step="0.1">
+                        <span class="sf-filter-sep">–</span>
+                        <input type="number" id="a2-high" min="0" step="1">
+                        <span class="sf-field-unit">Hz</span>
+                    </div>
+                </div>
+
+                <div class="peak-limits-section">
+                    <div class="peak-limits-header">
+                        <h3><i class="fas fa-microchip" style="color: #22c55e; margin-right: 8px;"></i>Pivot</h3>
+                        <span style="color: #64748b; font-size: 0.9rem;">Bandpass filter &amp; sampling frequency for the Pivot sensor.</span>
+                    </div>
+                    <div class="sf-filter-row">
+                        <span class="sf-filter-label">Bandpass filter</span>
+                        <input type="number" id="a3-low" min="0" step="0.1">
+                        <span class="sf-filter-sep">–</span>
+                        <input type="number" id="a3-high" min="0" step="1">
+                        <span class="sf-field-unit">Hz</span>
+                        <span class="sf-filter-label sf-filter-label--sampling">Sampling Frequency</span>
+                        <select id="a3-sf" class="sf-sampling-select"></select>
+                        <span class="sf-field-unit">Hz</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Urgent Maintenance Limit — Static Test (<40 km/h) -->
+            <div class="threshold-section">
+                <div class="section-title">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    <h2>Urgent Maintenance Limit — Static Test (&lt;40 km/h)</h2>
+                </div>
+                <div class="peak-limits-section">
+                    <div class="table-container">
+                        <table class="uml-table">
+                            <thead>
+                                <tr>
+                                    <th>Parameter</th>
+                                    <th>Left (g)</th>
+                                    <th>Right (g)</th>
+                                    <th>Pivot (g)</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td class="row-label">Vertical</td>
+                                    <td>
+                                        <div class="uml-range-cell">
+                                            <input type="number" id="uml-a1-vert-low"  min="0" step="0.01" placeholder="min">
+                                            <span class="range-sep">to</span>
+                                            <input type="number" id="uml-a1-vert-high" min="0" step="0.01" placeholder="max">
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <div class="uml-range-cell">
+                                            <input type="number" id="uml-a2-vert-low"  min="0" step="0.01" placeholder="min">
+                                            <span class="range-sep">to</span>
+                                            <input type="number" id="uml-a2-vert-high" min="0" step="0.01" placeholder="max">
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <div class="uml-range-cell">
+                                            <input type="number" min="0" step="0.01" placeholder="min" disabled title="Pivot UML not yet available">
+                                            <span class="range-sep">to</span>
+                                            <input type="number" min="0" step="0.01" placeholder="max" disabled title="Pivot UML not yet available">
+                                        </div>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td class="row-label">Lateral</td>
+                                    <td>
+                                        <div class="uml-range-cell">
+                                            <input type="number" id="uml-a1-lat-low"  min="0" step="0.01" placeholder="min">
+                                            <span class="range-sep">to</span>
+                                            <input type="number" id="uml-a1-lat-high" min="0" step="0.01" placeholder="max">
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <div class="uml-range-cell">
+                                            <input type="number" id="uml-a2-lat-low"  min="0" step="0.01" placeholder="min">
+                                            <span class="range-sep">to</span>
+                                            <input type="number" id="uml-a2-lat-high" min="0" step="0.01" placeholder="max">
+                                        </div>
+                                    </td>
+                                    <td>
+                                        <div class="uml-range-cell">
+                                            <input type="number" min="0" step="0.01" placeholder="min" disabled title="Pivot UML not yet available">
+                                            <span class="range-sep">to</span>
+                                            <input type="number" min="0" step="0.01" placeholder="max" disabled title="Pivot UML not yet available">
+                                        </div>
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <p class="table-note">Applies only when speed &lt; 40 km/h (static test condition).</p>
+                </div>
+            </div>
+
             <!-- Axis Limit Values - Left (unit: a1) -->
             <div class="peak-limits-section">
                 <div class="peak-limits-header">

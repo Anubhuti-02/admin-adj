@@ -7,29 +7,29 @@
 
 const SERVER_URL = window.location.origin;
 
-// ── Hardware online detection ─────────────────────────────────────────────
-let lastSensorDataTime = 0;
+// ── Hardware online detection — PER SENSOR ────────────────────────────────
+// Was a single global flag driven only by left/right packets, which meant
+// (a) RCI was gated entirely on left's own packet arrival, and (b) losing
+// left made the whole chart go dead even while right/pivot kept reporting.
+// Each sensor now has its own last-seen time and online flag, so each
+// sensor's RCI line lives or dies independently of the others.
+const lastSensorDataTime = { left: 0, right: 0, pivot: 0 };
 const DATA_TIMEOUT_MS = 10000;   // 10 seconds without data → offline
-let isHardwareOnline = false;
+const sensorOnline = { left: false, right: false, pivot: false };
 
+// Single combined RCI chart: one line, driven only by genuine incoming
+// packets (see rciPendingUpdate / the tick below) — this function's only
+// job now is to keep sensorOnline[] accurate for whichever sensors are
+// still within the timeout window. It no longer resets or re-fetches the
+// chart on transitions: when a sensor drops, the chart simply stops
+// receiving new points from it and holds whatever was last plotted, and
+// when it (or another sensor) comes back, live pushes just resume from
+// wherever the buffer left off — no reset, no synthetic gap-fill.
 function updateOnlineStatus() {
     const now = Date.now();
-    const wasOnline = isHardwareOnline;
-    isHardwareOnline = (now - lastSensorDataTime) < DATA_TIMEOUT_MS;
-
-    // If we just went offline and the 24h tab is active, switch to yesterday timeseries
-    if (wasOnline && !isHardwareOnline && currentPeriod === 1) {
-        console.log('[RCI] Hardware offline → loading yesterday timeseries');
-        activateRCITab(1);   // activateRCITab sees isHardwareOnline=false → calls fetchAndRenderRCITimeseries('24h')
-    }
-    // If we just came online and the 24h tab is active, clear to live rolling mode
-    if (!wasOnline && isHardwareOnline && currentPeriod === 1) {
-        console.log('[RCI] Hardware online → switching to LIVE rolling');
-        rciChart.data.labels = emptyLabels(RCI_N);
-        rciChart.data.datasets[0].data = new Array(RCI_N).fill(null);
-        rciChart.options.scales.x.ticks.maxTicksLimit = 8;
-        rciChart.update();
-    }
+    ['left', 'right', 'pivot'].forEach(s => {
+        sensorOnline[s] = (now - lastSensorDataTime[s]) < DATA_TIMEOUT_MS;
+    });
 }
 
 // Check online status every 2 seconds
@@ -96,7 +96,9 @@ const distanceChart = new Chart(document.getElementById('distanceChart').getCont
             { label: 'AB-L-VERT', data: [], borderColor: '#22c55e', borderWidth: 2, tension: 0.3, pointRadius: 0, spanGaps: false },
             { label: 'AB-L-LAT',  data: [], borderColor: '#eab308', borderWidth: 2, tension: 0.3, pointRadius: 0, spanGaps: false },
             { label: 'AB-R-VERT', data: [], borderColor: '#ef4444', borderWidth: 2, tension: 0.3, pointRadius: 0, spanGaps: false },
-            { label: 'AB-R-LAT',  data: [], borderColor: '#8b5cf6', borderWidth: 2, tension: 0.3, pointRadius: 0, spanGaps: false }
+            { label: 'AB-R-LAT',  data: [], borderColor: '#8b5cf6', borderWidth: 2, tension: 0.3, pointRadius: 0, spanGaps: false },
+            { label: 'AB-P-VERT', data: [], borderColor: '#f97316', borderWidth: 2, tension: 0.3, pointRadius: 0, spanGaps: false },
+            { label: 'AB-P-LAT',  data: [], borderColor: '#0ea5e9', borderWidth: 2, tension: 0.3, pointRadius: 0, spanGaps: false }
         ]
     },
     options: {
@@ -193,25 +195,27 @@ async function loadHistoricalRange() {
         const data = await res.json();
         const left  = data.left  || [];
         const right = data.right || [];
+        const pivot = data.pivot || [];
 
-        if (!left.length && !right.length) {
+        if (!left.length && !right.length && !pivot.length) {
             _setDistMsg('No data found for the selected period.');
             return;
         }
 
-        const n = Math.max(left.length, right.length);
-        const labels = [], lVert = [], lLat = [], rVert = [], rLat = [];
+        const n = Math.max(left.length, right.length, pivot.length);
+        const labels = [], lVert = [], lLat = [], rVert = [], rLat = [], pVert = [], pLat = [];
         distTimestamps = [];
         for (let i = 0; i < n; i++) {
             const distM = i * 10;
             const km = Math.floor(distM / 1000), rem = distM % 1000;
             labels.push(km + '.' + String(rem).padStart(3, '0') + ' km');
-            distTimestamps.push((left[i] || right[i] || {}).timestamp || null);
-            // Y is vertical, X is lateral — matches ACCEL_AXIS_MAP on the server.
-            if (left[i])  { const {x=0,y=0} = left[i];  lVert.push(Math.abs(y)); lLat.push(Math.abs(x)); }
+            distTimestamps.push((left[i] || right[i] || pivot[i] || {}).timestamp || null);
+            if (left[i])  { const {x=0,y=0,z=0} = left[i];  lVert.push(Math.abs(z)); lLat.push(Math.sqrt(x*x+y*y)); }
             else          { lVert.push(null); lLat.push(null); }
-            if (right[i]) { const {x=0,y=0} = right[i]; rVert.push(Math.abs(y)); rLat.push(Math.abs(x)); }
+            if (right[i]) { const {x=0,y=0,z=0} = right[i]; rVert.push(Math.abs(z)); rLat.push(Math.sqrt(x*x+y*y)); }
             else          { rVert.push(null); rLat.push(null); }
+            if (pivot[i]) { const {x=0,y=0,z=0} = pivot[i]; pVert.push(Math.abs(z)); pLat.push(Math.sqrt(x*x+y*y)); }
+            else          { pVert.push(null); pLat.push(null); }
         }
 
         distanceChart.data.labels           = labels;
@@ -219,6 +223,8 @@ async function loadHistoricalRange() {
         distanceChart.data.datasets[1].data = lLat;
         distanceChart.data.datasets[2].data = rVert;
         distanceChart.data.datasets[3].data = rLat;
+        distanceChart.data.datasets[4].data = pVert;
+        distanceChart.data.datasets[5].data = pLat;
         distanceChart.resetZoom();
         distanceChart.update('none');
 
@@ -305,14 +311,47 @@ function calculateSperlingWz(rmsG) {
     return Math.round(wz * 100) / 100;                        // 2 d.p.
 }
 
-function setRCIStatus(wz) {
-    const el = document.getElementById('rciStatus');
-    if (!el) return;
+function setRCIStatusEl(elId, wz) {
+    const el = document.getElementById(elId);
+    if (!el || wz == null) return;
     if (wz <= 2.0) { el.textContent = 'Excellent'; el.className = 'rci-status status-excellent'; }
     else if (wz <= 2.75) { el.textContent = 'Good'; el.className = 'rci-status status-good'; }
     else if (wz <= 3.25) { el.textContent = 'Fair'; el.className = 'rci-status status-fair'; }
     else if (wz <= 3.75) { el.textContent = 'Poor'; el.className = 'rci-status status-poor'; }
     else { el.textContent = 'Very Poor'; el.className = 'rci-status status-poor'; }
+}
+
+function formatRciLabel(d, period) {
+    if (period === '24h') {
+        return d.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false });
+    } else if (period === '7d') {
+        return d.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: '2-digit' })
+            + ' ' + d.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false });
+    }
+    return d.toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata', day: '2-digit', month: '2-digit' });
+}
+
+// Updates the current/avg/best/worst (+ optional status pill) elements for
+// one dataset's worth of Wz values (nulls allowed/ignored).
+function updateRciStatEls(values, ids) {
+    const valid = values.filter(v => v != null);
+    if (!valid.length) {
+        [ids.current, ids.avg, ids.best, ids.worst].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.textContent = '—';
+        });
+        return;
+    }
+    const avg    = valid.reduce((a, b) => a + b, 0) / valid.length;
+    const best   = Math.min(...valid);
+    const worst  = Math.max(...valid);
+    const latest = values[values.length - 1] ?? valid[valid.length - 1];
+    const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v.toFixed(1); };
+    set(ids.current, latest);
+    set(ids.avg, avg);
+    set(ids.best, best);
+    set(ids.worst, worst);
+    if (ids.status) setRCIStatusEl(ids.status, latest);
 }
 
 // ── RCI Chart ─────────────────────────────────────────────────────────────
@@ -350,22 +389,36 @@ const rciZoneBandPlugin = {
     }
 };
 
+const rciTooltipLabel = ctx => {
+    const wz = ctx.parsed.y;
+    if (wz == null) return null;
+    const grade = wz <= 2.0 ? 'Excellent'
+        : wz <= 2.75 ? 'Good'
+            : wz <= 3.25 ? 'Fair'
+                : wz <= 3.75 ? 'Poor'
+                    : 'Very Poor';
+    return `${ctx.dataset.label}: Wz ${wz.toFixed(2)} — ${grade}`;
+};
+
+// Single combined chart — one line, fed by whichever sensors are online
+// (see rciLiveTick()). This replaces the earlier "average only left+right,
+// gated on left's packet" bug: now any sensor (left, right, or pivot) keeps
+// the line moving, and the value shown is the average across whichever of
+// them are currently reporting.
 const rciChart = new Chart(document.getElementById('rciChart').getContext('2d'), {
     type: 'line',
     plugins: [rciZoneBandPlugin],
     data: {
         labels: emptyLabels(RCI_N),
-        datasets: [{
-            label: 'Sperling Wz',
-            data: new Array(RCI_N).fill(null),   // null = no line until real data arrives
-            borderColor: '#3b82f6',
-            backgroundColor: 'rgba(59,130,246,0.06)',
-            borderWidth: 2.5,
-            tension: 0.4,
-            fill: false,
-            pointRadius: 0,
-            spanGaps: false                       // do not connect across nulls
-        }]
+        datasets: [
+            {
+                label: 'Ride Comfort Index',
+                data: new Array(RCI_N).fill(null),
+                borderColor: '#3b82f6',
+                backgroundColor: 'rgba(59,130,246,0.06)',
+                borderWidth: 2.5, tension: 0.4, fill: false, pointRadius: 0, spanGaps: false
+            }
+        ]
     },
     options: {
         responsive: true,
@@ -373,45 +426,33 @@ const rciChart = new Chart(document.getElementById('rciChart').getContext('2d'),
         animation: { duration: 300 },
         plugins: {
             legend: { display: false },
-            tooltip: {
-                callbacks: {
-                    label: ctx => {
-                        const wz = ctx.parsed.y;
-                        const grade = wz <= 2.0 ? 'Excellent'
-                            : wz <= 2.75 ? 'Good'
-                                : wz <= 3.25 ? 'Fair'
-                                    : wz <= 3.75 ? 'Poor'
-                                        : 'Very Poor';
-                        return `Wz ${wz.toFixed(2)} — ${grade}`;
-                    }
-                }
-            }
+            tooltip: { callbacks: { label: rciTooltipLabel } }
         },
         scales: {
             y: {
-                // Dynamic — no hard min/max; Chart.js will fit to data
-                suggestedMin: 1.0,
-                suggestedMax: 5.0,
+                suggestedMin: 1.0, suggestedMax: 5.0,
                 title: { display: true, text: 'Sperling Ride Index Wz' },
                 grid: { color: '#f1f5f9' },
                 ticks: { stepSize: 0.25, callback: v => v.toFixed(2) }
             },
-            x: {
-                ticks: { maxRotation: 45, maxTicksLimit: 10 },
-                grid: { display: false }
-            }
+            x: { ticks: { maxRotation: 45, maxTicksLimit: 10 }, grid: { display: false } }
         }
     }
 });
 
 // ── Tab state ─────────────────────────────────────────────────────────────
-let currentPeriod = 1;   // 1=24h, 7=7d, 30=30d
+let currentPeriod = 1;        // 1=24h, 7=7d, 30=30d
+
+const RCI_IDS = { current: 'rciCurrent', avg: 'rciAvg', best: 'rciBest', worst: 'rciWorst', status: 'rciStatus' };
 
 
-// ── Fetch average Wz (for historical summary cards only) ──────────────────
-async function fetchAverageWz(days) {
+// ── Fetch average Wz (for historical summary cards) — combined by default ─
+// sensor is optional; when omitted the server pools rows across whichever
+// sensors reported (left/right/pivot) instead of narrowing to one.
+async function fetchAverageWz(days, sensor = null) {
     try {
-        const res = await fetch(`${SERVER_URL}/api/rci/average?days=${days}`);
+        const url = `${SERVER_URL}/api/rci/average?days=${days}` + (sensor ? `&sensor=${sensor}` : '');
+        const res = await fetch(url);
         const data = await res.json();
         if (data.avgRms != null) return calculateSperlingWz(data.avgRms);
         return null;
@@ -421,152 +462,128 @@ async function fetchAverageWz(days) {
     }
 }
 
-// ── Fetch RCI timeseries from DB and render on chart ──────────────────────
-// period: '24h' | '7d' | '30d'
-// API returns raw rms_v_g (g-units).  ALL Sperling computation is done here.
-
-async function fetchAndRenderRCITimeseries(period) {
+async function fetchRciSeries(period, sensor = null) {
     try {
-        const res = await fetch(`${SERVER_URL}/api/rci/timeseries?period=${period}`);
+        const url = `${SERVER_URL}/api/rci/timeseries?period=${period}` + (sensor ? `&sensor=${sensor}` : '');
+        const res = await fetch(url);
         const data = await res.json();
-
-        if (!data.points || !data.points.length) {
-            console.warn(`[RCI] No timeseries data for period=${period}`);
-            return null;
-        }
-
-        // Server returns DESC (latest first) — reverse to chronological for chart
-        const ordered = [...data.points].reverse();
-
-        // ── Sperling Wz computation — ALL unit conversion done here ──────
-        // rms_v_g is in g-units  →  convert to cm/s²  →  apply Bf  →  Wz
-        // Formula: Wz = 0.896 × (rms_g × 981 × Bf)^0.3
-        //   where Bf = 0.325 for vertical vibration at FREQ_HZ = 100 Hz
-        const wzValues = ordered.map(p => {
-            const wz = calculateSperlingWz(p.rms_v_g);
-            return wz !== null ? wz : null;
-        });
-
-        // Filter nulls for stats only
-        const validWz = wzValues.filter(v => v !== null);
-        if (!validWz.length) {
-            console.warn(`[RCI] All Wz values null for period=${period}`);
-            return null;
-        }
-
-        // ── Build timestamp labels ────────────────────────────────────────
-        const labels = ordered.map(p => {
-            const d = new Date(p.timestamp);
-            if (period === '24h') {
-                return d.toLocaleTimeString('en-IN', {
-                    timeZone: 'Asia/Kolkata',
-                    hour: '2-digit', minute: '2-digit', hour12: false
-                });
-            } else if (period === '7d') {
-                return d.toLocaleDateString('en-IN', {
-                    timeZone: 'Asia/Kolkata', day: '2-digit', month: '2-digit'
-                }) + ' ' + d.toLocaleTimeString('en-IN', {
-                    timeZone: 'Asia/Kolkata', hour: '2-digit', minute: '2-digit', hour12: false
-                });
-            } else {
-                return d.toLocaleDateString('en-IN', {
-                    timeZone: 'Asia/Kolkata', day: '2-digit', month: '2-digit'
-                });
-            }
-        });
-
-        // ── Push to chart — Y-axis will auto-scale to actual Wz range ────
-        rciChart.data.labels = labels;
-        rciChart.data.datasets[0].data = wzValues;
-        rciChart.options.scales.x.ticks.maxTicksLimit = period === '24h' ? 12 : (period === '7d' ? 14 : 15);
-        rciChart.update();
-
-        // ── Stats ────────────────────────────────────────────────────────
-        const sumWz = validWz.reduce((a, b) => a + b, 0);
-        const avgWz = sumWz / validWz.length;
-        const bestWz = Math.min(...validWz);    // lower Wz = smoother ride
-        const worstWz = Math.max(...validWz);
-        const latestWz = wzValues[wzValues.length - 1] ?? wzValues.find(v => v !== null);
-
-        document.getElementById('rciCurrent').textContent = latestWz.toFixed(1);
-        setRCIStatus(latestWz);
-        document.getElementById('rciAvg').textContent = avgWz.toFixed(1);
-        document.getElementById('rciBest').textContent = bestWz.toFixed(1);
-        document.getElementById('rciWorst').textContent = worstWz.toFixed(1);
-
-        // Debug log with full unit chain
-        const sampleRmsG = ordered[ordered.length - 1]?.rms_v_g ?? 0;
-        const _bf = _getSperlingBf();
-        console.log(
-            `[RCI] period=${period} | ODR=${_configuredOdrHz}Hz Bf=${_bf} | ${validWz.length} pts | ` +
-            `latest rms=${sampleRmsG}g → ` +
-            `a=${(sampleRmsG * 981).toFixed(1)} cm/s² → ` +
-            `a_weighted=${(sampleRmsG * 981 * _bf).toFixed(1)} cm/s² → ` +
-            `Wz=${latestWz.toFixed(2)} | avg=${avgWz.toFixed(2)} best=${bestWz.toFixed(2)} worst=${worstWz.toFixed(2)}`
-        );
-
-        return { points: ordered, wzValues, avgWz, bestWz, worstWz };
-
+        return data.points || [];
     } catch (e) {
-        console.error(`[RCI] fetchAndRenderRCITimeseries(${period}) failed:`, e);
-        return null;
+        console.error(`[RCI] fetchRciSeries(${period}) failed:`, e);
+        return [];
     }
 }
 
-// ── Update historical summary cards ──────────────────────────────────────
-async function updateHistoricalCards() {
-    const yesterdayWz = await fetchAverageWz(1);
-    const weekWz = await fetchAverageWz(7);
-    const monthWz = await fetchAverageWz(30);
-    if (yesterdayWz !== null) document.getElementById('rciYesterday').textContent = yesterdayWz.toFixed(1);
-    if (weekWz !== null) document.getElementById('rciWeekAvg').textContent = weekWz.toFixed(1);
-    if (monthWz !== null) document.getElementById('rciMonthAvg').textContent = monthWz.toFixed(1);
+// ── Combined timeseries → the single RCI chart/dataset ────────────────────
+// API returns raw rms_v_g (g-units), already averaged across whichever
+// sensors reported in each time bucket. All Sperling computation happens
+// here: rms_v_g → cm/s² → apply Bf → Wz = 0.896 × (rms_g × 981 × Bf)^0.3
+async function fetchAndRenderRCICombined(period) {
+    const pts = await fetchRciSeries(period);
+    if (!pts.length) { console.warn(`[RCI] No timeseries data for ${period}`); return null; }
+
+    const ordered  = [...pts].reverse(); // server returns DESC — chart wants chronological
+    const wzValues = ordered.map(p => calculateSperlingWz(p.rms_v_g));
+    const validWz  = wzValues.filter(v => v !== null);
+    if (!validWz.length) { console.warn(`[RCI] All Wz null for ${period}`); return null; }
+
+    const labels = ordered.map(p => formatRciLabel(new Date(p.timestamp), period));
+    rciChart.data.labels = labels;
+    rciChart.data.datasets[0].data = wzValues;
+    rciChart.options.scales.x.ticks.maxTicksLimit = period === '24h' ? 12 : (period === '7d' ? 14 : 15);
+    rciChart.update();
+
+    updateRciStatEls(wzValues, RCI_IDS);
+    console.log(`[RCI] combined/${period}: ${validWz.length} pts, latest Wz=${wzValues[wzValues.length - 1]?.toFixed(2)}`);
+    return { wzValues };
 }
 
-// ── Activate tab (called on tab click or programmatically) ─────────────────
+// ── Update historical summary cards (combined across all sensors) ─────────
+async function updateHistoricalCards() {
+    const [y, w, m] = await Promise.all([fetchAverageWz(1), fetchAverageWz(7), fetchAverageWz(30)]);
+    const set = (id, v) => { if (v != null) { const el = document.getElementById(id); if (el) el.textContent = v.toFixed(1); } };
+    set('rciYesterday', y);
+    set('rciWeekAvg', w);
+    set('rciMonthAvg', m);
+}
+
+// ── Activate RCI tab (called on tab click or programmatically) ────────────
 async function activateRCITab(days) {
     currentPeriod = days;
-    document.querySelectorAll('.rci-tab').forEach(btn => {
+    document.querySelectorAll('#rciMainTabs .rci-tab').forEach(btn => {
         btn.classList.toggle('active', parseInt(btn.dataset.days) === days);
     });
 
     if (days === 1) {
-        if (isHardwareOnline) {
-            // Hardware ONLINE: live rolling mode — reset chart to empty, socket data will fill it
-            console.log('[RCI] 24h tab: hardware ONLINE → LIVE rolling');
+        if (sensorOnline.left || sensorOnline.right || sensorOnline.pivot) {
+            // At least one sensor is live — reset to an empty rolling
+            // buffer; rciLiveTick() fills it with the average of whichever
+            // sensors are actually online, moment to moment.
+            console.log('[RCI] 24h tab: at least one sensor online → LIVE rolling');
             rciChart.data.labels = emptyLabels(RCI_N);
             rciChart.data.datasets[0].data = new Array(RCI_N).fill(null);
             rciChart.options.scales.x.ticks.maxTicksLimit = 8;
             rciChart.update();
         } else {
-            // Hardware OFFLINE: show yesterday's timeseries from DB
-            console.log('[RCI] 24h tab: hardware OFFLINE → showing yesterday timeseries');
-            const result = await fetchAndRenderRCITimeseries('24h');
+            console.log('[RCI] 24h tab: all sensors offline → showing yesterday timeseries');
+            const result = await fetchAndRenderRCICombined('24h');
             if (!result) {
-                // No data at all — show empty chart
                 rciChart.data.labels = emptyLabels(RCI_N);
                 rciChart.data.datasets[0].data = new Array(RCI_N).fill(null);
                 rciChart.update();
-                document.getElementById('rciAvg').textContent = '—';
-                document.getElementById('rciBest').textContent = '—';
-                document.getElementById('rciWorst').textContent = '—';
+                ['rciAvg', 'rciBest', 'rciWorst'].forEach(id => {
+                    const el = document.getElementById(id); if (el) el.textContent = '—';
+                });
             }
         }
     } else {
-        // 7d or 30d: always fetch and render full timeseries from DB
         const periodStr = days === 7 ? '7d' : '30d';
-        console.log(`[RCI] ${periodStr} tab → fetching timeseries`);
-        const result = await fetchAndRenderRCITimeseries(periodStr);
+        const result = await fetchAndRenderRCICombined(periodStr);
         if (!result) {
             rciChart.data.labels = emptyLabels(RCI_N);
             rciChart.data.datasets[0].data = new Array(RCI_N).fill(null);
             rciChart.update();
-            document.getElementById('rciAvg').textContent = '—';
-            document.getElementById('rciBest').textContent = '—';
-            document.getElementById('rciWorst').textContent = '—';
+            ['rciAvg', 'rciBest', 'rciWorst'].forEach(id => {
+                const el = document.getElementById(id); if (el) el.textContent = '—';
+            });
         }
     }
 }
+
+// ── Live RCI tick — fires on genuine new packets only ──────────────────────
+// Fixed twice now: first it was gated on left's own packet (froze the whole
+// chart when left dropped), then it was switched to a blind wall-clock
+// setInterval — but that pushed a "new" point every second regardless of
+// whether any sensor had actually sent fresh data, which just re-plotted
+// the same stale cached RMS on a loop and made the line look like it was
+// live-scrolling even with everything disconnected.
+//
+// Fix: accelerometer-data (any sensor) sets rciPendingUpdate = true. This
+// tick still runs every second, but only computes/pushes a point when that
+// flag is set, then clears it. No new real data in a given second → no
+// push → the line holds exactly where it was (last real value), instead of
+// drifting forward on its own.
+let rciPendingUpdate = false;
+const RCI_TICK_MS = 1000;
+setInterval(() => {
+    if (currentPeriod !== 1) return;
+    if (!rciPendingUpdate) return;   // nothing new since last tick — stay frozen
+    rciPendingUpdate = false;
+
+    const onlineRms = ['left', 'right', 'pivot']
+        .filter(s => sensorOnline[s])
+        .map(s => cache[s].rms)
+        .filter(v => v != null && v > 0);
+
+    if (!onlineRms.length) return;   // all offline — freeze, don't push a gap either
+
+    const combinedWz = calculateSperlingWz(onlineRms.reduce((a, b) => a + b, 0) / onlineRms.length);
+    const distLabel = formatDistLabel(distanceM);
+    rollDataset(rciChart, 0, combinedWz, distLabel);
+    rciChart.update();
+
+    updateRciStatEls(rciChart.data.datasets[0].data, RCI_IDS);
+}, RCI_TICK_MS);
 
 // ── Sensor cache ──────────────────────────────────────────────────────────
 const cache = {
@@ -604,8 +621,10 @@ socket.on('odr-config-changed', (cfg) => {
     const avgOdr = (cfg.accel1 + cfg.accel2) / 2;
     _configuredOdrHz = avgOdr;
     console.log(`[graphs] ODR changed → ${avgOdr}Hz  Bf=${_getSperlingBf()} — refreshing RCI`);
+
     const periodStr = currentPeriod === 1 ? '24h' : currentPeriod === 7 ? '7d' : '30d';
-    if (currentPeriod !== 1 || !isHardwareOnline) fetchAndRenderRCITimeseries(periodStr);
+    const anyOnline = sensorOnline.left || sensorOnline.right || sensorOnline.pivot;
+    if (currentPeriod !== 1 || !anyOnline) fetchAndRenderRCICombined(periodStr);
 });
 
 // ── Initial load ──────────────────────────────────────────────────────────
@@ -626,7 +645,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     // Attach tab listeners
-    document.querySelectorAll('.rci-tab').forEach(btn => {
+    document.querySelectorAll('#rciMainTabs .rci-tab').forEach(btn => {
         btn.addEventListener('click', () => activateRCITab(parseInt(btn.dataset.days)));
     });
 
@@ -635,7 +654,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Refresh cards every hour
     setInterval(updateHistoricalCards, 60 * 60 * 1000);
 
-    // Activate default tab (24h) – will decide live vs historical based on current online status
+    // Activate default tab (24h) – decides live vs historical from combined sensor online status
     activateRCITab(1);
 
     // Fetch configured ODR so Sperling Bf is correct from the first frame
@@ -653,8 +672,9 @@ socket.on('accelerometer-data', data => {
     const side = data.sensor;
     if (side !== 'left' && side !== 'right' && side !== 'pivot') return;
 
-    lastSensorDataTime = Date.now();
+    lastSensorDataTime[side] = Date.now();
     updateOnlineStatus();
+    rciPendingUpdate = true;   // real packet arrived — let the next tick push a genuine point
 
     const x = data.x ?? 0;
     const y = data.y ?? 0;
@@ -673,8 +693,8 @@ socket.on('accelerometer-data', data => {
     cache[side].rms = rmsV;   // store RMS (g)
 
     // Raw subplots
-    const sp  = side === 'left' ? subplots.s1 : side === 'right' ? subplots.s2 : subplots.s3;
-    const pfx = side === 'left' ? 'raw1'       : side === 'right' ? 'raw2'       : 'raw3';
+    const sp = side === 'left' ? subplots.s1 : side === 'right' ? subplots.s2 : subplots.s3;
+    const pfx = side === 'left' ? 'raw1' : side === 'right' ? 'raw2' : 'raw3';
     pushSubplot(sp.x, x);
     pushSubplot(sp.y, y);
     pushSubplot(sp.z, z);
@@ -698,6 +718,8 @@ socket.on('accelerometer-data', data => {
         distanceChart.data.datasets[1].data.push(lat);
         distanceChart.data.datasets[2].data.push(cache.right.vert);
         distanceChart.data.datasets[3].data.push(cache.right.lat);
+        distanceChart.data.datasets[4].data.push(cache.pivot.vert);
+        distanceChart.data.datasets[5].data.push(cache.pivot.lat);
 
         // Roll off oldest once we exceed the live window
         if (distanceChart.data.labels.length > LIVE_DIST_N) {
@@ -707,63 +729,31 @@ socket.on('accelerometer-data', data => {
         }
     }
 
-    // ── RCI: Use average RMS from both accelerometers ─────────────────────
-    const leftRms = cache.left.rms;
-    const rightRms = cache.right.rms;
-    let avgRms = null;
-
-    if (leftRms !== null && rightRms !== null) {
-        avgRms = (leftRms + rightRms) / 2;
-    } else if (leftRms !== null) {
-        avgRms = leftRms;
-    } else if (rightRms !== null) {
-        avgRms = rightRms;
-    } else {
-        // fallback to vertical g if RMS not available (should rarely happen)
-        avgRms = (cache.left.vert + cache.right.vert) / 2;
-    }
-
-    const wz = calculateSperlingWz(avgRms);
-
-    if (wz !== null) {
-        if (currentPeriod === 1 && isHardwareOnline) {
-            // Live rolling update (only on left packet to keep consistent time step)
-            if (side === 'left') {
-                const distLabel = formatDistLabel(distanceM);
-                rollDataset(rciChart, 0, wz, distLabel);
-                const rciData = rciChart.data.datasets[0].data.filter(v => v !== null);
-                if (rciData.length) {
-                    const avgRCI = rciData.reduce((a, b) => a + b, 0) / rciData.length;
-                    const bestWz = Math.min(...rciData);
-                    const worstWz = Math.max(...rciData);
-                    document.getElementById('rciCurrent').textContent = wz.toFixed(1);
-                    document.getElementById('rciAvg').textContent = avgRCI.toFixed(1);
-                    document.getElementById('rciBest').textContent = bestWz.toFixed(1);
-                    document.getElementById('rciWorst').textContent = worstWz.toFixed(1);
-                }
-            } else {
-                // Right sensor only updates current reading, chart waits for left
-                document.getElementById('rciCurrent').textContent = wz.toFixed(1);
-            }
-            setRCIStatus(wz);
-        } else {
-            // Not in live mode – just update the current reading
-            document.getElementById('rciCurrent').textContent = wz.toFixed(1);
-            setRCIStatus(wz);
-        }
-    }
+    // NOTE: RCI (Left/Right/Pivot) is no longer computed here — it used to be
+    // gated on side === 'left', which averaged left+right together and froze
+    // the whole chart the instant left went offline. It's now driven by the
+    // independent rciLiveTick() interval above, which reads each sensor's own
+    // cache[...].rms and pushes its own line regardless of what the other
+    // sensors are doing.
 
     // Update legend values (always)
     document.getElementById('distVal1').textContent = cache.left.vert.toFixed(4) + ' g';
     document.getElementById('distVal2').textContent = cache.left.lat.toFixed(4) + ' g';
     document.getElementById('distVal3').textContent = cache.right.vert.toFixed(4) + ' g';
     document.getElementById('distVal4').textContent = cache.right.lat.toFixed(4) + ' g';
+    document.getElementById('distVal5').textContent = cache.pivot.vert.toFixed(4) + ' g';
+    document.getElementById('distVal6').textContent = cache.pivot.lat.toFixed(4) + ' g';
 
     scheduleRender();
 });
 
 
 // ── Raw DB polling (fallback) ─────────────────────────────────────────────
+// NOTE: pushes vertical → subplot.z and lateral → subplot.x for each sensor,
+// mirroring channelPrefixFor()'s l/r/p prefixes from /api/acceleration/channels.
+// Pivot (s3) used to be missing here entirely, so its X/Y/Z canvases never
+// got backfilled with history — they just sat on their initial buffer values
+// (flat line / single block) until enough live socket packets rolled through.
 async function fetchRawFromDB() {
     try {
         const data = await fetch(`${SERVER_URL}/api/acceleration/channels?minutes=60`).then(r => r.json());
@@ -774,6 +764,8 @@ async function fetchRawFromDB() {
             if (pt.ll != null) pushSubplot(subplots.s1.x, pt.ll);
             if (pt.rv != null) pushSubplot(subplots.s2.z, pt.rv);
             if (pt.rl != null) pushSubplot(subplots.s2.x, pt.rl);
+            if (pt.pv != null) pushSubplot(subplots.s3.z, pt.pv);
+            if (pt.pl != null) pushSubplot(subplots.s3.x, pt.pl);
         });
     } catch (e) { console.error('[raw-db]', e); }
 }

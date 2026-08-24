@@ -141,11 +141,14 @@
     </div>
 </div>
 
-        <!-- Ride Comfort Index -->
+        <!-- Ride Comfort Index — single combined line across left/right/pivot.
+             Real-time via a wall-clock tick that averages whichever sensors
+             are currently online, so it keeps moving with any one, two, or
+             all three connected, and never freezes just because one drops. -->
         <div class="graph-card full-width" style="margin-top: 24px;">
             <div class="graph-header">
                 <h2><i class="fas fa-smile"></i> Ride Comfort Index (Sperling Wz)</h2>
-                <div class="rci-tabs">
+                <div class="rci-tabs" id="rciMainTabs">
                     <button class="rci-tab active" data-days="1">24h</button>
                     <button class="rci-tab" data-days="7">7d</button>
                     <button class="rci-tab" data-days="30">30d</button>

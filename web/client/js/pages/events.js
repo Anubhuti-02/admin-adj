@@ -424,6 +424,25 @@ function bandBadge(band) {
 function cardHTML(ev, idx) {
     const newTag = ev.isNew ? '<span class="new-tag">NEW</span>' : '';
     const hasGps = ev.lat != null && ev.lng != null;
+
+    // Peak-only middle row: pClass/threshold info, no raw axis tags.
+    const peakRow = `
+                <span class="event-meta">Peak <strong>${ev.peak.toFixed(3)} g</strong></span>
+                ${ev.appliedThreshold != null
+                    ? `<span class="event-meta">Threshold <strong>${ev.appliedThreshold} g</strong></span>`
+                    : '<span class="event-meta" style="color:#94a3b8;">Threshold —</span>'}`;
+
+    // Raw-only middle row: LAT/VERT axis tags, no pClass/peak-threshold info.
+    const rawRow = `
+                ${axisLimitTag('LAT',  ev.xVal, ev.latLimit,  '#ef4444')}${bandBadge(ev.latBand)}
+                ${axisLimitTag('VERT', ev.yVal, ev.vertLimit, '#22c55e')}${bandBadge(ev.vertBand)}`;
+
+    const bottomRow = viewModeVal === 'peak' ? peakRow
+        : viewModeVal === 'raw' ? rawRow
+        : peakRow + rawRow; // 'all' view keeps combined display
+
+    const topRowExtra = viewModeVal === 'raw' ? '' : pClassBadge(ev.pClass);
+
     return `
     <div class="event-card event-${ev.severity}${ev.isNew ? ' event-flash' : ''}${hasGps ? ' event-clickable' : ''}"
         ${hasGps ? `onclick="goToMapEvent(${idx})" title="View on map"` : ''}>
@@ -432,17 +451,12 @@ function cardHTML(ev, idx) {
                 ${newTag}
                 <span class="event-time">${ev.time}</span>
                 <span class="event-sensor">${ev.sensor}</span>
-                ${pClassBadge(ev.pClass)}
+                ${topRowExtra}
                 ${hasGps ? '<i class="fas fa-map-marked-alt event-map-hint" title="View on map"></i>' : ''}
             </div>
             <div class="event-bottom-row">
                 <span class="event-location"><i class="fas fa-map-marker-alt"></i> ${ev.location}</span>
-                <span class="event-meta">Peak <strong>${ev.peak.toFixed(3)} g</strong></span>
-                ${ev.appliedThreshold != null
-                    ? `<span class="event-meta">Threshold <strong>${ev.appliedThreshold} g</strong></span>`
-                    : '<span class="event-meta" style="color:#94a3b8;">Threshold —</span>'}
-                ${axisLimitTag('LAT',  ev.xVal, ev.latLimit,  '#ef4444')}${bandBadge(ev.latBand)}
-                ${axisLimitTag('VERT', ev.yVal, ev.vertLimit, '#22c55e')}${bandBadge(ev.vertBand)}
+                ${bottomRow}
             </div>
         </div>
         <div class="event-right">
@@ -472,12 +486,13 @@ function goToMapEvent(idx) {
 window.goToMapEvent = goToMapEvent;
 
 function renderAll(flashDot = false) {
-    document.getElementById('totalEvents').textContent  = allEvents.length;
-    document.getElementById('highEvents').textContent   = allEvents.filter(e => e.severity === 'high').length;
-    document.getElementById('mediumEvents').textContent = allEvents.filter(e => e.severity === 'medium').length;
-    document.getElementById('lowEvents').textContent    = allEvents.filter(e => e.severity === 'low').length;
-
     const list = filtered();
+    const statsBase = (viewModeVal === 'peak' || viewModeVal === 'raw') ? list : allEvents;
+
+    document.getElementById('totalEvents').textContent  = statsBase.length;
+    document.getElementById('highEvents').textContent   = statsBase.filter(e => e.severity === 'high').length;
+    document.getElementById('mediumEvents').textContent = statsBase.filter(e => e.severity === 'medium').length;
+    document.getElementById('lowEvents').textContent    = statsBase.filter(e => e.severity === 'low').length;
     const emptyMsg = viewModeVal === 'peak'
         ? 'No events have crossed a Priority (P1/P2/P3) peak threshold. Check Configuration → Priority Thresholds.'
         : viewModeVal === 'raw'
@@ -511,7 +526,7 @@ document.getElementById('filterDate')?.addEventListener('change', () => {
     fetchEvents();
 });
 
-function exportEvents() {
+async function exportEvents() {
     const dateInput = document.getElementById('filterDate');
     const url = new URL(`${API}/api/impacts/export/csv`);
 
@@ -526,7 +541,35 @@ function exportEvents() {
         url.searchParams.set('to',   HISTORY_TO);
     }
 
-    window.open(url.toString(), '_blank');
+    // Peak and raw exports are kept fully separate — different backend
+    // filter (?type=) and different downloaded filename, never a shared file.
+    let filename;
+    if (viewModeVal === 'peak') {
+        url.searchParams.set('type', 'peak');
+        filename = 'IMPACT_REPORTS_PEAK_EVENTS.csv';
+    } else if (viewModeVal === 'raw') {
+        url.searchParams.set('type', 'raw');
+        filename = 'IMPACT_REPORTS_RAW_EVENTS.csv';
+    } else {
+        filename = 'IMPACT_REPORTS_ALL_EVENTS.csv';
+    }
+
+    try {
+        const res = await fetch(url.toString());
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const blob = await res.blob();
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(blobUrl);
+    } catch (e) {
+        console.error('[events] export failed:', e.message);
+        alert('Export failed: ' + e.message);
+    }
 }
 window.exportEvents = exportEvents;
 

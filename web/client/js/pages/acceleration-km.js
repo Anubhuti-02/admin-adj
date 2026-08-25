@@ -16,13 +16,15 @@
     }
 
     // ═════════════════════════════════════════════════════════════════════
-    // ── DISTANCE-BASED BUCKETING (primary path) ────────────────────────────
-    // Each monitoring_data row now carries its own real distance_m, stamped
+    // ── DISTANCE-BASED BUCKETING (the only path) ───────────────────────────
+    // Each monitoring_data row carries its own real distance_m, stamped
     // server-side from live GPS (production) or simulate-distance.js (bench
-    // testing). Instead of guessing how many records a KM "should" contain,
-    // we equalize the route tape's real meter values directly against each
-    // record's own distance_m — so a record only lands in a block/KM if its
-    // measured position actually falls inside that block/KM's real span.
+    // testing). We equalize the route tape's real meter values directly
+    // against each record's own distance_m — so a record only lands in a
+    // block/KM if its measured position actually falls inside that
+    // block/KM's real span. There is no record-count estimation anywhere in
+    // this file: if a session hasn't shown real distance movement yet, the
+    // report waits instead of guessing.
     // ═════════════════════════════════════════════════════════════════════
 
     // "Real" distance means the system is moving RIGHT NOW — checked via the
@@ -80,98 +82,38 @@
         });
     }
 
-    // ═════════════════════════════════════════════════════════════════════
-    // ── LEGACY RECORD-COUNT FALLBACK ────────────────────────────────────────
-    // Used whenever a KM's docs show no real distance movement (distance_m
-    // is null, or stuck at 0 because there's no GPS fix / simulator running
-    // — see hasDistanceData() above). Keeps the report showing *something*
-    // instead of going blank, using a fixed 250-records-per-200m-block
-    // estimate. The instant any record shows real distance_m > 0, the
-    // precise distance-based path above takes over automatically.
-    // ═════════════════════════════════════════════════════════════════════
-    const RECORDS_PER_BLOCK = 200; // assumed records per 200m block, used only while distance_m isn't available (e.g. GPS not connected)
-
-    function getRecordsPerBlock() {
-        if (typeof AccelConfig === 'undefined') return RECORDS_PER_BLOCK;
-        const avg = (AccelConfig.getOdr(1) + AccelConfig.getOdr(2)) / 2;
-        return Math.max(Math.round(RECORDS_PER_BLOCK / Math.round(200 / avg)), 1);
-    }
-
-    function splitRecordsByBlockWeight(docs, blockLengths) {
-        const totalLen = blockLengths.reduce((a, b) => a + b, 0);
-        let idx = 0;
-        return blockLengths.map(len => {
-            const count = Math.round(docs.length * (len / totalLen));
-            const slice = docs.slice(idx, idx + count);
-            idx += count;
-            return slice;
-        });
-    }
-
-    // Nominal record count for a KM of real length L, scaled from the
-    // 250-records-per-200m-block baseline (was previously per-1000m, which
-    // undercounted each individual block by 5x).
-    function expectedRecordsForKmLength(lengthM) {
-        return Math.max(1, Math.round(getRecordsPerBlock() * (lengthM / 200)));
-    }
-
-    function cumulativeCursorUpTo(idx) {
-        let cursor = 0;
-        for (let i = 0; i < idx; i++) {
-            cursor += expectedRecordsForKmLength(routeTapeData.kmLengths[routeTapeKmNums[i]]);
-        }
-        return cursor;
-    }
-
-    function routeTapeProgress(sessionDocsLen) {
-        let cursor = 0;
-        for (let idx = 0; idx < routeTapeKmNums.length; idx++) {
-            const km = routeTapeKmNums[idx];
-            const expected = expectedRecordsForKmLength(routeTapeData.kmLengths[km]);
-            if (cursor + expected > sessionDocsLen) return { kmIdx: idx, km, cursor, expected };
-            cursor += expected;
-        }
-        return null;
-    }
-
     // Decides which route-tape KM a set of "current session" docs is
     // presently within. Checks only the MOST RECENT record's distance_m —
     // not "does any record in the session have distance_m > 0" — so stale
     // distance data from an earlier phase of this same run (see
     // hasDistanceData() above) can't wrongly commit the session to
     // distance-based resolution while it's actually sitting static now.
+    // Returns { usedDistance: false } if no real distance data exists yet —
+    // the caller is responsible for showing a "waiting" state in that case,
+    // there is no record-count guess to fall back to.
     function resolveCurrentKm(sessionDocs) {
-        if (!sessionDocs.length) return { usedDistance: false, progress: null };
+        if (!sessionDocs.length) return { usedDistance: false };
         const latest = sessionDocs[sessionDocs.length - 1]; // timestamp-sorted asc
         if (latest.distance_m != null && latest.distance_m > 0) {
             return { usedDistance: true, loc: routeTapeKmForDistance(latest.distance_m) };
         }
-        return { usedDistance: false, progress: routeTapeProgress(sessionDocs.length) };
+        return { usedDistance: false };
     }
 
-    // Builds a KM card using real route-tape block lengths. Prefers
-    // distance-based block placement (equalizing route-tape meters against
-    // each record's real distance_m); falls back to the old length-weighted
-    // record split only for docs with no distance_m at all.
-    // Empty blocks render as dashes (no "Collecting…" placeholder).
+    // Builds a KM card using real route-tape block lengths, purely from each
+    // record's own distance_m — no record-count estimation anywhere. Caller
+    // (updateReport) only invokes this once resolveCurrentKm() has confirmed
+    // real distance data exists for the session. Empty blocks render as
+    // dashes (no "Collecting…" placeholder).
     function buildRouteTapeCard(kmDocsSlice, kmNum, kmStart, hwLive) {
         const L = routeTapeData.kmLengths[kmNum];
         const kmEnd = kmStart + L;
         const blockLengths = blocksForKmLength(L);
-        const useDistance = hasDistanceData(kmDocsSlice);
 
-        const expectedRecords = useDistance ? null : expectedRecordsForKmLength(L);
-        const isPartial = useDistance
-            ? kmDocsSlice.reduce((m, d) => d.distance_m != null ? Math.max(m, d.distance_m) : m, kmStart) < kmEnd
-            : kmDocsSlice.length < expectedRecords;
+        const maxDist = kmDocsSlice.reduce((m, d) => d.distance_m != null ? Math.max(m, d.distance_m) : m, kmStart);
+        const isPartial = maxDist < kmEnd;
 
-        // While this KM is still partial (live collecting), spread samples
-        // across blocks by record weight so every row shows live averages
-        // even when distance_m has not advanced past the first 200m (bench /
-        // stationary). Once the KM is complete, use real distance placement.
-        const blockSplits = (useDistance && !isPartial)
-            ? splitRecordsByDistance(kmDocsSlice, kmStart, blockLengths)
-            : splitRecordsByBlockWeight(kmDocsSlice, blockLengths);
+        const blockSplits = splitRecordsByDistance(kmDocsSlice, kmStart, blockLengths);
 
         // Always render every block in real time. Empty slices show as "—"
         // via computeBlock([]) — no "Collecting…" placeholder rows.
@@ -183,51 +125,39 @@
         });
 
         const isDn = routeTapeData.direction === 'DN';
-        const distanceCoveredM = useDistance
-            ? Math.max(0, (kmDocsSlice.reduce((m, d) => d.distance_m != null ? Math.max(m, d.distance_m) : m, kmStart) - kmStart))
-            : null;
+        const distanceCoveredM = Math.max(0, maxDist - kmStart);
+        const worstPeaks = computeWorstPeaks(kmDocsSlice, kmStart);
 
         return {
             kmFrom:        kmNum,
             kmTo:          isDn ? kmNum - 1 : kmNum + 1,
             kmLengthM:     L,
             recordsSoFar:  kmDocsSlice.length,
-            recordsExpected: expectedRecords,
-            distanceBased: useDistance,
+            distanceBased: true,
             distanceCoveredM,
             isPartial,
             lastTimestamp: kmDocsSlice[kmDocsSlice.length - 1]?.timestamp ?? null,
             blocks,
-            peakDist:      computePeakDist(kmDocsSlice),
-            worstPeaks:    computeWorstPeaks(kmDocsSlice, useDistance, kmStart, blockLengths),
+            peakDist:      computePeakDist(worstPeaks),
+            worstPeaks,
             usedRouteTape: true,
         };
     }
 
     // Builds one card per route-tape KM for a full day's worth of docs (used
-    // by CSV export) — distance-based when the day's docs carry distance_m,
-    // record-count based otherwise.
+    // by CSV export) — purely distance_m-driven. Returns [] if the day has
+    // no real distance data at all (nothing to export by distance).
     function buildDayCardsFromRouteTape(docsForDay) {
         const cards = [];
-        const useDistance = hasDistanceData(docsForDay);
-        let cursor = 0; // meters if useDistance, else record index
+        if (!hasDistanceData(docsForDay)) return cards;
+        let cursor = 0; // meters
 
         for (const km of routeTapeKmNums) {
             const len = routeTapeData.kmLengths[km];
-            let kmDocsSlice, kmStart;
-
-            if (useDistance) {
-                kmStart = cursor;
-                const kmEnd = cursor + len;
-                kmDocsSlice = docsForDay.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
-                cursor = kmEnd;
-            } else {
-                if (cursor >= docsForDay.length) break;
-                kmStart = 0;
-                const expected = expectedRecordsForKmLength(len);
-                kmDocsSlice = docsForDay.slice(cursor, cursor + expected);
-                cursor += expected;
-            }
+            const kmStart = cursor;
+            const kmEnd = cursor + len;
+            const kmDocsSlice = docsForDay.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
+            cursor = kmEnd;
 
             if (kmDocsSlice.length) cards.push(buildRouteTapeCard(kmDocsSlice, km, kmStart, false));
         }
@@ -483,89 +413,73 @@
         return null;
     }
 
-    function computePeakDist(docs) {
+    const WORST_PEAK_KEY_META = {
+        'L-LAT':  { side: 'left',  axis: 'L', axisLetter: 'x' },
+        'L-VERT': { side: 'left',  axis: 'V', axisLetter: 'y' },
+        'R-LAT':  { side: 'right', axis: 'L', axisLetter: 'x' },
+        'R-VERT': { side: 'right', axis: 'V', axisLetter: 'y' },
+        'P-LAT':  { side: 'pivot', axis: 'L', axisLetter: 'x' },
+        'P-VERT': { side: 'pivot', axis: 'V', axisLetter: 'y' },
+    };
+
+    // Classifies the KM's worst-peaks (per-parameter top 10, see
+    // computeWorstPeaks) into P1/P2/P3 bands using the Axis Limit Values
+    // from Configuration — so Peak Distribution reflects which band the
+    // KM's actual worst readings fell into, and on which accelerometer.
+    function computePeakDist(worstPeaks) {
         const out = {
             left:  { V: { P1:0, P2:0, P3:0 }, L: { P1:0, P2:0, P3:0 } },
             right: { V: { P1:0, P2:0, P3:0 }, L: { P1:0, P2:0, P3:0 } },
-            pivot: { V: { P1:0, P2:0, P3:0 }, L: { P1:0, P2:0, P3:0 } }
-
+            pivot: { V: { P1:0, P2:0, P3:0 }, L: { P1:0, P2:0, P3:0 } },
         };
-        for (const d of docs) {
-            const side = d.device_id === 'right' ? 'right' : (d.device_id === 'pivot' ? 'pivot' : 'left');
-            // V (vertical) = y_axis, L (lateral) = x_axis — same mapping the
-            // table/CSV always used, now checked against the Axis Limit
-            // Values per-axis cutoffs instead of the axle/pivot range set.
-            const pV = classifyAxisLimitPeak(d.y_axis, getAxisLimitBand(side, 'y'));
-            const pL = classifyAxisLimitPeak(d.x_axis, getAxisLimitBand(side, 'x'));
-            if (pV) out[side].V[pV]++;
-            if (pL) out[side].L[pL]++;
+        for (const key of Object.keys(worstPeaks || {})) {
+            const meta = WORST_PEAK_KEY_META[key];
+            if (!meta) continue;
+            const band = getAxisLimitBand(meta.side, meta.axisLetter);
+            for (const peak of worstPeaks[key]) {
+                const p = classifyAxisLimitPeak(peak.value, band);
+                if (p) out[meta.side][meta.axis][p]++;
+            }
         }
         return out;
     }
 
-    // Worst peaks = max |raw| per block, kept as a FIFO queue of the last 10.
-    //
-    // Static: each block = 200 consecutive records (RECORDS_PER_BLOCK).
-    // Distance: each block = 200 m of distance_m within this KM.
-    //
-    // Column 1 = oldest retained block max, column 10 = newest.
-    // When an 11th block completes, column 1 is dropped and the new max
-    // is appended (queue shift). Recalculated every poll from kmDocsSlice.
-    function computeWorstPeaks(docs, useDistance, kmStart, blockLengths) {
+    // Top 10 highest individual readings for EACH of the 6 sensor/axis
+    // parameters within this KM, independently ranked. Deduped to the
+    // highest reading PER DISTINCT METER first — distance_m only advances
+    // on a GPS fix while the accelerometer samples much faster in between,
+    // so many raw readings can share the same rounded meter. Without this
+    // dedupe, a pure value-sort can fill all 10 slots from one GPS-static
+    // window; deduping first spreads the top 10 across as many distinct
+    // meters as actually exist in the KM's data.
+    function computeWorstPeaks(docs, kmStart) {
         const keys = ['L-LAT', 'L-VERT', 'R-LAT', 'R-VERT', 'P-LAT', 'P-VERT'];
         const empty = () => Object.fromEntries(keys.map(k => [k, []]));
         if (!docs || !docs.length) return empty();
 
-        function maxInDocs(slice) {
-            const cur = Object.fromEntries(keys.map(k => [k, null]));
-            for (const d of slice) {
-                const side = d.device_id === 'right' ? 'right' : (d.device_id === 'pivot' ? 'pivot' : 'left');
-                const latKey  = side === 'left' ? 'L-LAT'  : side === 'right' ? 'R-LAT'  : 'P-LAT';
-                const vertKey = side === 'left' ? 'L-VERT' : side === 'right' ? 'R-VERT' : 'P-VERT';
-                const lat  = d.x_axis != null ? Math.abs(d.x_axis) : null;
-                const vert = d.y_axis != null ? Math.abs(d.y_axis) : null;
-                if (lat  != null) cur[latKey]  = cur[latKey]  == null ? lat  : Math.max(cur[latKey],  lat);
-                if (vert != null) cur[vertKey] = cur[vertKey] == null ? vert : Math.max(cur[vertKey], vert);
-            }
-            return cur;
+        const buckets = Object.fromEntries(keys.map(k => [k, []]));
+        for (const d of docs) {
+            const side = d.device_id === 'right' ? 'right' : (d.device_id === 'pivot' ? 'pivot' : 'left');
+            const latKey  = side === 'left' ? 'L-LAT'  : side === 'right' ? 'R-LAT'  : 'P-LAT';
+            const vertKey = side === 'left' ? 'L-VERT' : side === 'right' ? 'R-VERT' : 'P-VERT';
+            const meter = (d.distance_m != null && kmStart != null) ? Math.round(d.distance_m - kmStart) : null;
+            if (d.x_axis != null) buckets[latKey].push({ value: +Math.abs(d.x_axis).toFixed(2), meter });
+            if (d.y_axis != null) buckets[vertKey].push({ value: +Math.abs(d.y_axis).toFixed(2), meter });
         }
 
-        // Build ordered list of block slices (oldest → newest).
-        let slices = [];
-        if (useDistance && kmStart != null && blockLengths && blockLengths.length) {
-            let blockStart = kmStart;
-            for (const len of blockLengths) {
-                const blockEnd = blockStart + len;
-                const slice = docs.filter(d =>
-                    d.distance_m != null && d.distance_m >= blockStart && d.distance_m < blockEnd
-                );
-                if (slice.length) slices.push(slice);
-                blockStart = blockEnd;
+        function dedupeByMeterKeepMax(entries) {
+            const byMeter = new Map();
+            for (const e of entries) {
+                const k = e.meter; // null meters (no distance) each stay distinct — nothing to collapse them by
+                const existing = byMeter.get(k);
+                if (k == null || !existing || e.value > existing.value) byMeter.set(k === null ? Symbol() : k, e);
             }
-            // Any docs past the last defined block (shouldn't happen often)
-            // are ignored — tape length owns the KM.
-        } else {
-            // Static: fixed 200-record windows, chronological.
-            const CHUNK = 100;
-            for (let i = 0; i < docs.length; i += CHUNK) {
-                const slice = docs.slice(i, i + CHUNK);
-                if (slice.length) slices.push(slice);
-            }
-        }
-
-        // Max per block, then keep only the last 10 (FIFO queue).
-        const series = Object.fromEntries(keys.map(k => [k, []]));
-        for (const slice of slices) {
-            const cur = maxInDocs(slice);
-            for (const k of keys) {
-                if (cur[k] != null) series[k].push(+cur[k].toFixed(1));
-            }
+            return [...byMeter.values()];
         }
 
         const out = empty();
         for (const k of keys) {
-            // last 10 only — drop oldest when longer than 10
-            out[k] = series[k].slice(-10);
+            out[k] = dedupeByMeterKeepMax(buckets[k]).sort((a, b) => b.value - a.value).slice(0, 10);
         }
         return out;
     }
@@ -619,30 +533,9 @@
         if (!peakDist) return '<p class="no-data">No distribution data yet.</p>';
         const l = peakDist.left, r = peakDist.right, p = peakDist.pivot || { V:{}, L:{} };
 
-        // Show which thresholds are driving the classification — pulled live
-        // from the Configuration page's "Axis Limit Values" section
-        // (/api/axis-limits: a1=Left, a2=Right, generic=Pivot). If it hasn't
-        // loaded yet (server unreachable, or nothing saved yet), say so
-        // plainly instead of inventing a number.
-        const bandStr = (side) => {
-            const bx = getAxisLimitBand(side, 'x'), by = getAxisLimitBand(side, 'y');
-            if (!bx || !by) return null;
-            return `V: P1 ${by.p1 ?? '—'}g · P2 ${by.p2 ?? '—'}g · P3 ${by.p3 ?? '—'}g` +
-                   ` &nbsp;|&nbsp; L: P1 ${bx.p1 ?? '—'}g · P2 ${bx.p2 ?? '—'}g · P3 ${bx.p3 ?? '—'}g`;
-        };
-        const leftStr = bandStr('left'), rightStr = bandStr('right'), pivotStr = bandStr('pivot');
-        const thresholdNote = (leftStr && rightStr && pivotStr)
-            ? `<div style="font-size:10px;color:#64748b;margin-bottom:6px;font-style:italic;">
-                Using Axis Limit Values — Left: ${leftStr}
-                <br>Right: ${rightStr}
-                <br>Pivot: ${pivotStr}
-                <a href="configuration.html" style="color:#64748b;">Configure →</a>
-            </div>`
-            : `<div style="font-size:10px;color:#c2410c;margin-bottom:6px;font-style:italic;">
-                ⚠ Axis Limit Values not loaded from Configuration yet — counts below may be blank.
-                <a href="configuration.html" style="color:#c2410c;">Configure →</a>
-            </div>`;
-
+        // Tooltips still pull live from the Configuration page's "Axis
+        // Limit Values" section (/api/axis-limits) per band/side/axis, just
+        // no longer surfaced as a banner above the table.
         const bandTip = (side, axisCol, band) => {
             const axisLetter = axisCol === 'V' ? 'y' : 'x';
             const b = getAxisLimitBand(side, axisLetter);
@@ -664,7 +557,6 @@
             </tr>`;
         };
         return `<div class="table-container">
-            ${thresholdNote}
             <table>
                 <thead><tr><th rowspan="2">BANDS</th><th colspan="2">LEFT</th><th colspan="2">RIGHT</th><th colspan="2">PIVOT</th></tr>
                 <tr><th>V</th><th>L</th><th>V</th><th>L</th><th>V</th><th>L</th></tr></thead>
@@ -681,38 +573,13 @@
             const vals = worstPeaks[param] || [];
             const cells = Array.from({length: 10}, (_, i) => {
                 const v = vals[i];
-                return `<td class="${v != null ? peakClass(v) : ''}">${v != null ? v : '—'}</td>`;
+                const text = v ? `${fmt(v.value,2)}${v.meter != null ? '/' + v.meter : ''}` : '—';
+                return `<td class="${v ? peakClass(v.value) : ''}">${text}</td>`;
             }).join('');
             return `<tr><td>${param}</td>${cells}</tr>`;
         }).join('');
 
-        // Progress note: how many records went into this table, and distance
-        // span when available (xxx m / Y m of this KM).
-        let progressNote = '';
-        if (meta) {
-            const n = meta.recordsSoFar != null ? meta.recordsSoFar : null;
-            const windows = n != null ? Math.ceil(n / 1000) : null;
-            if (meta.distanceBased && meta.kmLengthM != null) {
-                const covered = meta.distanceCoveredM != null ? Math.round(meta.distanceCoveredM) : null;
-                const total = Math.round(meta.kmLengthM);
-                const distPart = covered != null
-                    ? `${covered} m / ${total} m`
-                    : `${total} m KM`;
-                progressNote = `<div style="font-size:10px;color:#64748b;margin-bottom:6px;font-style:italic;">
-                    Worst peak per 200&nbsp;m block (col 1 = oldest, last col = newest; queue of 10)
-                    ${n != null ? `· ${n} records` : ''}
-                    · ${distPart}
-                </div>`;
-            } else {
-                progressNote = `<div style="font-size:10px;color:#64748b;margin-bottom:6px;font-style:italic;">
-                    Worst peak per 200-record block (col 1 = oldest, last col = newest; queue of 10)
-                    ${n != null ? `· ${n} records` : ''}
-                </div>`;
-            }
-        }
-
         return `<div class="table-container">
-            ${progressNote}
             <table>
                 <thead>${header}</thead>
                 <tbody>${rows}</tbody>
@@ -732,10 +599,7 @@
         if (data.historical) {
             badge = `<span class="historical-badge"><i class="fas fa-history"></i> Last Session</span>`;
         } else if (data.isPartial && isLive) {
-            const progressLabel = data.distanceBased
-                ? `${data.recordsSoFar} pts`
-                : `${data.recordsSoFar}/${data.recordsExpected}`;
-            badge = `<span class="live-badge"><i class="fas fa-circle blink"></i> LIVE &nbsp;<span style="font-size:11px">${progressLabel}</span></span>`;
+            badge = `<span class="live-badge"><i class="fas fa-circle blink"></i> LIVE &nbsp;<span style="font-size:11px">${data.recordsSoFar} pts</span></span>`;
         }
 
         container.innerHTML = `
@@ -852,6 +716,83 @@
         return docs; // no gap found — the whole day is one continuous run
     }
 
+    // Scans the ENTIRE historical dataset (not date-limited) for the index
+    // of the most recent record that carried real distance_m — no matter
+    // how long ago. Returns -1 only if distance_m has never once been
+    // recorded across the whole database.
+    function findLastDistanceAnchorIdx(docsAll) {
+        for (let i = docsAll.length - 1; i >= 0; i--) {
+            if (docsAll[i].distance_m != null && docsAll[i].distance_m > 0) return i;
+        }
+        return -1;
+    }
+
+    // Given the index of a record known to carry real distance_m, pulls
+    // together every doc from that record's own contiguous run (same
+    // gap-detection rule as currentRunDocs) so the KM card is built only
+    // from that one session's data — not blended with older/unrelated runs
+    // before or after it.
+    function runDocsAroundAnchor(docsAll, anchorIdx, gapMinutes = RUN_GAP_MINUTES) {
+        const gapMs = gapMinutes * 60000;
+        let start = anchorIdx, end = anchorIdx;
+        while (start > 0 && (new Date(docsAll[start].timestamp) - new Date(docsAll[start - 1].timestamp)) <= gapMs) start--;
+        while (end < docsAll.length - 1 && (new Date(docsAll[end + 1].timestamp) - new Date(docsAll[end].timestamp)) <= gapMs) end++;
+        return docsAll.slice(start, end + 1);
+    }
+
+    // Last-resort fallback: no distance data for today, and none for the
+    // most recent day either. Instead of leaving the report blank, walks
+    // ALL of allDocs backward — regardless of date, even months old — for
+    // the last time distance_m ever advanced, and renders that KM so the
+    // page always shows at least one real KM's worth of data when any
+    // distance-based session exists anywhere in history.
+    function renderFromHistoricalAnchor(hwLive) {
+        const anchorIdx = findLastDistanceAnchorIdx(allDocs);
+
+        if (anchorIdx === -1) {
+            document.getElementById('km-container').innerHTML = `
+                <div class="no-data-banner">
+                    <i class="fas fa-satellite-dish"></i>
+                    <p>No distance data has ever been recorded.</p>
+                    <p style="color:#94a3b8;font-size:12px">KM blocks require real distance_m against the uploaded route tape.</p>
+                </div>`;
+            setStatus(hwLive);
+            setToolbarCount(0);
+            lastCard = null;
+            return;
+        }
+
+        const anchor  = allDocs[anchorIdx];
+        const runDocs = runDocsAroundAnchor(allDocs, anchorIdx);
+        const loc     = routeTapeKmForDistance(anchor.distance_m);
+
+        if (!loc) {
+            // That old session's distance had run past the end of the
+            // CURRENTLY uploaded route tape — show the last KM closed out.
+            const lastIdx = routeTapeKmNums.length - 1;
+            const lastKm  = routeTapeKmNums[lastIdx];
+            const kmStart = cumulativeDistanceStart(lastIdx);
+            const lastKmDocs = runDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart);
+            const card = buildRouteTapeCard(lastKmDocs, lastKm, kmStart, false);
+            card.historical = true;
+            card.routeTapeExhausted = true;
+            setStatus(hwLive);
+            setToolbarCount(routeTapeKmNums.length);
+            lastCard = card;
+            renderCard(card);
+            return;
+        }
+
+        const { km, kmIdx, kmStart, kmEnd } = loc;
+        const kmDocsSlice = runDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
+        const card = buildRouteTapeCard(kmDocsSlice, km, kmStart, false);
+        card.historical = true;
+        setStatus(hwLive);
+        setToolbarCount(kmIdx);
+        lastCard = card;
+        renderCard(card);
+    }
+
     async function updateReport() {
       try {
         // 0. Fetch limits config + axle/pivot P-class thresholds (keeps peak
@@ -908,55 +849,36 @@
             sessionDocs = currentRunDocs(todayDocs);
             historical = false;
 
-            // ── Route-tape-driven KM sizing: real KM lengths from the RT file,
-            // 200m blocks. resolveCurrentKm() prefers each record's own real
-            // distance_m (GPS in production, simulate-distance.js on the
-            // bench); it only falls back to the ODR-based record-count guess
-            // when none of the session's docs carry a distance_m at all. ──
+            // ── Route-tape-driven KM sizing: real KM lengths from the RT
+            // file, 200m blocks, resolved purely from each record's own
+            // real distance_m (GPS in production, simulate-distance.js on
+            // the bench). No record-count guessing anywhere — if the
+            // session hasn't shown real distance movement yet, we wait. ──
             const resolved = resolveCurrentKm(sessionDocs);
 
+            if (!resolved.usedDistance) {
+                renderFromHistoricalAnchor(hwLive);
+                return;
+            }
+
             if (hwLive) {
-                if (resolved.usedDistance) {
-                    if (resolved.loc) {
-                        const { km, kmIdx, kmStart, kmEnd } = resolved.loc;
-                        const kmDocsSlice = sessionDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
-                        const card = buildRouteTapeCard(kmDocsSlice, km, kmStart, true);
-                        card.historical = false;
-                        setStatus(hwLive);
-                        setToolbarCount(kmIdx);
-                        lastCard = card;
-                        renderCard(card);
-                    } else {
-                        // Distance has run past the end of the uploaded route
-                        // tape — show the last KM fully closed out.
-                        const lastIdx = routeTapeKmNums.length - 1;
-                        const lastKm = routeTapeKmNums[lastIdx];
-                        const kmStart = cumulativeDistanceStart(lastIdx);
-                        const lastKmDocs = sessionDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart);
-                        const card = buildRouteTapeCard(lastKmDocs, lastKm, kmStart, false);
-                        card.historical = false;
-                        card.routeTapeExhausted = true;
-                        setStatus(hwLive);
-                        setToolbarCount(routeTapeKmNums.length);
-                        lastCard = card;
-                        renderCard(card);
-                    }
-                } else if (resolved.progress) {
-                    const progress = resolved.progress;
-                    const partialStart = cumulativeCursorUpTo(progress.kmIdx);
-                    const partialDocs = sessionDocs.slice(partialStart);
-                    const card = buildRouteTapeCard(partialDocs, progress.km, 0, true);
+                if (resolved.loc) {
+                    const { km, kmIdx, kmStart, kmEnd } = resolved.loc;
+                    const kmDocsSlice = sessionDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
+                    const card = buildRouteTapeCard(kmDocsSlice, km, kmStart, true);
                     card.historical = false;
                     setStatus(hwLive);
-                    setToolbarCount(progress.kmIdx);
+                    setToolbarCount(kmIdx);
                     lastCard = card;
                     renderCard(card);
                 } else {
+                    // Distance has run past the end of the uploaded route
+                    // tape — show the last KM fully closed out.
                     const lastIdx = routeTapeKmNums.length - 1;
                     const lastKm = routeTapeKmNums[lastIdx];
-                    const start = cumulativeCursorUpTo(lastIdx);
-                    const lastKmDocs = sessionDocs.slice(start);
-                    const card = buildRouteTapeCard(lastKmDocs, lastKm, 0, false);
+                    const kmStart = cumulativeDistanceStart(lastIdx);
+                    const lastKmDocs = sessionDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart);
+                    const card = buildRouteTapeCard(lastKmDocs, lastKm, kmStart, false);
                     card.historical = false;
                     card.routeTapeExhausted = true;
                     setStatus(hwLive);
@@ -966,54 +888,28 @@
                 }
             } else {
                 // Offline but today has data: show last completed route-tape KM if any
-                if (resolved.usedDistance) {
-                    const completedIdx = resolved.loc ? resolved.loc.kmIdx : routeTapeKmNums.length;
-                    if (completedIdx > 0) {
-                        const lastIdx = completedIdx - 1;
-                        const lastKm = routeTapeKmNums[lastIdx];
-                        const kmStart = cumulativeDistanceStart(lastIdx);
-                        const kmEnd = kmStart + routeTapeData.kmLengths[lastKm];
-                        const lastKmDocs = sessionDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
-                        const card = buildRouteTapeCard(lastKmDocs, lastKm, kmStart, false);
-                        card.historical = false;
-                        setStatus(hwLive);
-                        setToolbarCount(completedIdx);
-                        lastCard = card;
-                        renderCard(card);
-                    } else {
-                        const firstKm = routeTapeKmNums[0];
-                        const kmDocsSlice = sessionDocs.filter(d => d.distance_m != null && d.distance_m < routeTapeData.kmLengths[firstKm]);
-                        const card = buildRouteTapeCard(kmDocsSlice, firstKm, 0, false);
-                        card.historical = false;
-                        setStatus(hwLive);
-                        setToolbarCount(0);
-                        lastCard = card;
-                        renderCard(card);
-                    }
+                const completedIdx = resolved.loc ? resolved.loc.kmIdx : routeTapeKmNums.length;
+                if (completedIdx > 0) {
+                    const lastIdx = completedIdx - 1;
+                    const lastKm = routeTapeKmNums[lastIdx];
+                    const kmStart = cumulativeDistanceStart(lastIdx);
+                    const kmEnd = kmStart + routeTapeData.kmLengths[lastKm];
+                    const lastKmDocs = sessionDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
+                    const card = buildRouteTapeCard(lastKmDocs, lastKm, kmStart, false);
+                    card.historical = false;
+                    setStatus(hwLive);
+                    setToolbarCount(completedIdx);
+                    lastCard = card;
+                    renderCard(card);
                 } else {
-                    const progress = resolved.progress;
-                    const completedIdx = progress ? progress.kmIdx : routeTapeKmNums.length;
-                    if (completedIdx > 0) {
-                        const lastIdx = completedIdx - 1;
-                        const lastKm = routeTapeKmNums[lastIdx];
-                        const start = cumulativeCursorUpTo(lastIdx);
-                        const expected = expectedRecordsForKmLength(routeTapeData.kmLengths[lastKm]);
-                        const lastKmDocs = sessionDocs.slice(start, start + expected);
-                        const card = buildRouteTapeCard(lastKmDocs, lastKm, 0, false);
-                        card.historical = false;
-                        setStatus(hwLive);
-                        setToolbarCount(completedIdx);
-                        lastCard = card;
-                        renderCard(card);
-                    } else {
-                        const firstKm = routeTapeKmNums[0];
-                        const card = buildRouteTapeCard(sessionDocs, firstKm, 0, false);
-                        card.historical = false;
-                        setStatus(hwLive);
-                        setToolbarCount(0);
-                        lastCard = card;
-                        renderCard(card);
-                    }
+                    const firstKm = routeTapeKmNums[0];
+                    const kmDocsSlice = sessionDocs.filter(d => d.distance_m != null && d.distance_m < routeTapeData.kmLengths[firstKm]);
+                    const card = buildRouteTapeCard(kmDocsSlice, firstKm, 0, false);
+                    card.historical = false;
+                    setStatus(hwLive);
+                    setToolbarCount(0);
+                    lastCard = card;
+                    renderCard(card);
                 }
             }
             return;
@@ -1027,55 +923,33 @@
 
         const resolvedPrev = resolveCurrentKm(prevDayDocs);
 
-        if (resolvedPrev.usedDistance) {
-            const completedIdxPrev = resolvedPrev.loc ? resolvedPrev.loc.kmIdx : routeTapeKmNums.length;
-            if (completedIdxPrev > 0) {
-                const lastIdx = completedIdxPrev - 1;
-                const lastKm = routeTapeKmNums[lastIdx];
-                const kmStart = cumulativeDistanceStart(lastIdx);
-                const kmEnd = kmStart + routeTapeData.kmLengths[lastKm];
-                const lastKmDocs = prevDayDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
-                const card = buildRouteTapeCard(lastKmDocs, lastKm, kmStart, false);
-                card.historical = true;
-                setStatus(hwLive);
-                setToolbarCount(completedIdxPrev);
-                lastCard = card;
-                renderCard(card);
-            } else {
-                const firstKm = routeTapeKmNums[0];
-                const kmDocsSlice = prevDayDocs.filter(d => d.distance_m != null && d.distance_m < routeTapeData.kmLengths[firstKm]);
-                const card = buildRouteTapeCard(kmDocsSlice, firstKm, 0, false);
-                card.historical = true;
-                setStatus(hwLive);
-                setToolbarCount(0);
-                lastCard = card;
-                renderCard(card);
-            }
-        } else {
-            const progressPrev = resolvedPrev.progress;
-            const completedIdxPrev = progressPrev ? progressPrev.kmIdx : routeTapeKmNums.length;
+        if (!resolvedPrev.usedDistance) {
+            renderFromHistoricalAnchor(hwLive);
+            return;
+        }
 
-            if (completedIdxPrev > 0) {
-                const lastIdx = completedIdxPrev - 1;
-                const lastKm = routeTapeKmNums[lastIdx];
-                const start = cumulativeCursorUpTo(lastIdx);
-                const expected = expectedRecordsForKmLength(routeTapeData.kmLengths[lastKm]);
-                const lastKmDocs = prevDayDocs.slice(start, start + expected);
-                const card = buildRouteTapeCard(lastKmDocs, lastKm, 0, false);
-                card.historical = true;
-                setStatus(hwLive);
-                setToolbarCount(completedIdxPrev);
-                lastCard = card;
-                renderCard(card);
-            } else {
-                const firstKm = routeTapeKmNums[0];
-                const card = buildRouteTapeCard(prevDayDocs, firstKm, 0, false);
-                card.historical = true;
-                setStatus(hwLive);
-                setToolbarCount(0);
-                lastCard = card;
-                renderCard(card);
-            }
+        const completedIdxPrev = resolvedPrev.loc ? resolvedPrev.loc.kmIdx : routeTapeKmNums.length;
+        if (completedIdxPrev > 0) {
+            const lastIdx = completedIdxPrev - 1;
+            const lastKm = routeTapeKmNums[lastIdx];
+            const kmStart = cumulativeDistanceStart(lastIdx);
+            const kmEnd = kmStart + routeTapeData.kmLengths[lastKm];
+            const lastKmDocs = prevDayDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
+            const card = buildRouteTapeCard(lastKmDocs, lastKm, kmStart, false);
+            card.historical = true;
+            setStatus(hwLive);
+            setToolbarCount(completedIdxPrev);
+            lastCard = card;
+            renderCard(card);
+        } else {
+            const firstKm = routeTapeKmNums[0];
+            const kmDocsSlice = prevDayDocs.filter(d => d.distance_m != null && d.distance_m < routeTapeData.kmLengths[firstKm]);
+            const card = buildRouteTapeCard(kmDocsSlice, firstKm, 0, false);
+            card.historical = true;
+            setStatus(hwLive);
+            setToolbarCount(0);
+            lastCard = card;
+            renderCard(card);
         }
       } catch (err) {
         // Surface the real error on-screen instead of silently leaving the

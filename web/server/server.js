@@ -2654,9 +2654,9 @@ function kmSplitRecordsByDistance(docs, kmStart, blockLengths) {
         return slice;
     });
 }
-function kmMaxVal(arr) {
+function kmAvgVal(arr) {
     const valid = arr.filter(v => v != null && !isNaN(v));
-    return valid.length ? Math.max(...valid) : null;
+    return valid.length ? valid.reduce((s, x) => s + x, 0) / valid.length : null;
 }
 function kmComputeBlock(docs, blkIdx) {
     const left  = docs.filter(d => d.device_id === 'left');
@@ -2665,9 +2665,9 @@ function kmComputeBlock(docs, blkIdx) {
     const pick  = (arr, f) => arr.map(d => d[f]).filter(v => v != null);
     return {
         label: `BLK${blkIdx + 1}`,
-        left:  { rmsV: kmMaxVal(pick(left, 'rmsV')),  rmsL: kmMaxVal(pick(left, 'rmsL')),  sdV: kmMaxVal(pick(left, 'sdV')),  sdL: kmMaxVal(pick(left, 'sdL')) },
-        right: { rmsV: kmMaxVal(pick(right, 'rmsV')), rmsL: kmMaxVal(pick(right, 'rmsL')), sdV: kmMaxVal(pick(right, 'sdV')), sdL: kmMaxVal(pick(right, 'sdL')) },
-        pivot: { rmsV: kmMaxVal(pick(pivot, 'rmsV')), rmsL: kmMaxVal(pick(pivot, 'rmsL')), sdV: kmMaxVal(pick(pivot, 'sdV')), sdL: kmMaxVal(pick(pivot, 'sdL')) },
+        left:  { rmsV: kmAvgVal(pick(left, 'rmsV')),  rmsL: kmAvgVal(pick(left, 'rmsL')),  sdV: kmAvgVal(pick(left, 'sdV')),  sdL: kmAvgVal(pick(left, 'sdL')) },
+        right: { rmsV: kmAvgVal(pick(right, 'rmsV')), rmsL: kmAvgVal(pick(right, 'rmsL')), sdV: kmAvgVal(pick(right, 'sdV')), sdL: kmAvgVal(pick(right, 'sdL')) },
+        pivot: { rmsV: kmAvgVal(pick(pivot, 'rmsV')), rmsL: kmAvgVal(pick(pivot, 'rmsL')), sdV: kmAvgVal(pick(pivot, 'sdV')), sdL: kmAvgVal(pick(pivot, 'sdL')) },
     };
 }
 function kmGetAxisLimitBand(side, axisLetter) {
@@ -2683,59 +2683,67 @@ function kmClassifyAxisLimitPeak(g, band) {
     if (band.p1 != null && v >= +band.p1) return 'P1';
     return null;
 }
-function kmComputePeakDist(docs) {
+const KM_WORST_PEAK_KEY_META = {
+    'L-LAT':  { side: 'left',  axis: 'L', axisLetter: 'x' },
+    'L-VERT': { side: 'left',  axis: 'V', axisLetter: 'y' },
+    'R-LAT':  { side: 'right', axis: 'L', axisLetter: 'x' },
+    'R-VERT': { side: 'right', axis: 'V', axisLetter: 'y' },
+    'P-LAT':  { side: 'pivot', axis: 'L', axisLetter: 'x' },
+    'P-VERT': { side: 'pivot', axis: 'V', axisLetter: 'y' },
+};
+function kmComputePeakDist(worstPeaks) {
     const out = {
         left:  { V: { P1: 0, P2: 0, P3: 0 }, L: { P1: 0, P2: 0, P3: 0 } },
         right: { V: { P1: 0, P2: 0, P3: 0 }, L: { P1: 0, P2: 0, P3: 0 } },
         pivot: { V: { P1: 0, P2: 0, P3: 0 }, L: { P1: 0, P2: 0, P3: 0 } },
     };
-    for (const d of docs) {
-        const side = d.device_id === 'right' ? 'right' : (d.device_id === 'pivot' ? 'pivot' : 'left');
-        const pV = kmClassifyAxisLimitPeak(d.y_axis, kmGetAxisLimitBand(side, 'y'));
-        const pL = kmClassifyAxisLimitPeak(d.x_axis, kmGetAxisLimitBand(side, 'x'));
-        if (pV) out[side].V[pV]++;
-        if (pL) out[side].L[pL]++;
+    for (const key of Object.keys(worstPeaks || {})) {
+        const meta = KM_WORST_PEAK_KEY_META[key];
+        if (!meta) continue;
+        const band = kmGetAxisLimitBand(meta.side, meta.axisLetter);
+        for (const peak of worstPeaks[key]) {
+            const p = kmClassifyAxisLimitPeak(peak.value, band);
+            if (p) out[meta.side][meta.axis][p]++;
+        }
     }
     return out;
 }
-function kmComputeWorstPeaks(docs, kmStart, blockLengths) {
+// Top 10 highest individual readings for EACH of the 6 sensor/axis
+// parameters within this KM, independently ranked. Deduped to the highest
+// reading PER DISTINCT METER first — distance_m only advances on a GPS fix
+// while the accelerometer samples much faster in between, so many raw
+// readings can share the same rounded meter. Deduping first spreads the
+// top 10 across as many distinct meters as actually exist in the data,
+// instead of a pure value-sort filling all 10 slots from one GPS-static
+// window.
+function kmComputeWorstPeaks(docs, kmStart) {
     const keys  = ['L-LAT', 'L-VERT', 'R-LAT', 'R-VERT', 'P-LAT', 'P-VERT'];
     const empty = () => Object.fromEntries(keys.map(k => [k, []]));
     if (!docs || !docs.length) return empty();
 
-    function maxInDocs(slice) {
-        const cur = Object.fromEntries(keys.map(k => [k, null]));
-        for (const d of slice) {
-            const side    = d.device_id === 'right' ? 'right' : (d.device_id === 'pivot' ? 'pivot' : 'left');
-            const latKey  = side === 'left' ? 'L-LAT' : side === 'right' ? 'R-LAT' : 'P-LAT';
-            const vertKey = side === 'left' ? 'L-VERT' : side === 'right' ? 'R-VERT' : 'P-VERT';
-            const lat  = d.x_axis != null ? Math.abs(d.x_axis) : null;
-            const vert = d.y_axis != null ? Math.abs(d.y_axis) : null;
-            if (lat  != null) cur[latKey]  = cur[latKey]  == null ? lat  : Math.max(cur[latKey], lat);
-            if (vert != null) cur[vertKey] = cur[vertKey] == null ? vert : Math.max(cur[vertKey], vert);
-        }
-        return cur;
+    const buckets = Object.fromEntries(keys.map(k => [k, []]));
+    for (const d of docs) {
+        const side    = d.device_id === 'right' ? 'right' : (d.device_id === 'pivot' ? 'pivot' : 'left');
+        const latKey  = side === 'left' ? 'L-LAT' : side === 'right' ? 'R-LAT' : 'P-LAT';
+        const vertKey = side === 'left' ? 'L-VERT' : side === 'right' ? 'R-VERT' : 'P-VERT';
+        const meter = (d.distance_m != null && kmStart != null) ? Math.round(d.distance_m - kmStart) : null;
+        if (d.x_axis != null) buckets[latKey].push({ value: +Math.abs(d.x_axis).toFixed(2), meter });
+        if (d.y_axis != null) buckets[vertKey].push({ value: +Math.abs(d.y_axis).toFixed(2), meter });
     }
 
-    let slices = [];
-    if (kmStart != null && blockLengths && blockLengths.length) {
-        let blockStart = kmStart;
-        for (const len of blockLengths) {
-            const blockEnd = blockStart + len;
-            const slice = docs.filter(d => d.distance_m != null && d.distance_m >= blockStart && d.distance_m < blockEnd);
-            if (slice.length) slices.push(slice);
-            blockStart = blockEnd;
+    function dedupeByMeterKeepMax(entries) {
+        const byMeter = new Map();
+        for (const e of entries) {
+            const existing = byMeter.get(e.meter);
+            if (e.meter == null || !existing || e.value > existing.value) byMeter.set(e.meter === null ? Symbol() : e.meter, e);
         }
-    }
-
-    const series = Object.fromEntries(keys.map(k => [k, []]));
-    for (const slice of slices) {
-        const cur = maxInDocs(slice);
-        for (const k of keys) if (cur[k] != null) series[k].push(+cur[k].toFixed(1));
+        return [...byMeter.values()];
     }
 
     const out = empty();
-    for (const k of keys) out[k] = series[k].slice(-10);
+    for (const k of keys) {
+        out[k] = dedupeByMeterKeepMax(buckets[k]).sort((a, b) => b.value - a.value).slice(0, 10);
+    }
     return out;
 }
 function kmBuildDayCards(docsForDay) {
@@ -2764,11 +2772,12 @@ function kmBuildDayCards(docsForDay) {
                 return c;
             });
             const isDn = chainagePreview.direction === 'DN';
+            const worstPeaks = kmComputeWorstPeaks(kmDocsSlice, kmStart);
             cards.push({
                 kmFrom: km, kmTo: isDn ? km - 1 : km + 1, kmLengthM: len,
                 blocks,
-                peakDist:   kmComputePeakDist(kmDocsSlice),
-                worstPeaks: kmComputeWorstPeaks(kmDocsSlice, kmStart, blockLengths),
+                peakDist:   kmComputePeakDist(worstPeaks),
+                worstPeaks,
             });
         } else if (kmStart >= maxDistDoc && cards.length > 0) {
             break;
@@ -2828,9 +2837,12 @@ function buildKmWiseReportCsv(docsForDay, reportDate) {
         rows.push("Parameter,1,2,3,4,5,6,7,8,9,10");
         const wp = card.worstPeaks || {};
         ['L-LAT', 'L-VERT', 'R-LAT', 'R-VERT', 'P-LAT', 'P-VERT'].forEach(param => {
-            const vals = (wp[param] || []).map(v => kmFmt(v, 1));
-            while (vals.length < 10) vals.push('—');
-            rows.push([param, ...vals].join(','));
+            const vals = wp[param] || [];
+            const cells = Array.from({length: 10}, (_, i) => {
+                const v = vals[i];
+                return v ? `${kmFmt(v.value,2)}/${v.meter != null ? v.meter : ''}` : '—';
+            });
+            rows.push([param, ...cells].join(','));
         });
 
         rows.push("");

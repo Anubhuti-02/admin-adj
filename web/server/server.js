@@ -1466,6 +1466,67 @@ app.get('/api/rci/timeseries', async (req, res) => {
     }
 });
 
+// ── Last Available RCI Data (any date) ────────────────────────────────────
+// Fetches the most recent saved RCI data from the database, regardless of
+// when it occurred. Used when all sensors are offline to show the last known
+// state instead of a blank chart.
+app.get('/api/rci/last-available', async (req, res) => {
+    const sensor = rciSensorFilter(req.query.sensor);
+    const maxPoints = 100;  // Show up to 100 recent data points
+
+    try {
+        if (!pgReady) {
+            return res.json({ points: [], sampleCount: 0, sensor: sensor || 'all' });
+        }
+
+        // Find the most recent timestamp with data
+        const latestQuery = await pool.query(`
+            SELECT MAX(timestamp) as latest_ts
+            FROM realtime_data
+            WHERE rms_v IS NOT NULL AND rms_v > 0
+            ${sensor ? 'AND sensor = $1' : ''}
+        `, sensor ? [sensor] : []);
+
+        if (!latestQuery.rows.length || !latestQuery.rows[0].latest_ts) {
+            return res.json({ points: [], sampleCount: 0, sensor: sensor || 'all' });
+        }
+
+        const latestTs = latestQuery.rows[0].latest_ts;
+        const latestDate = DateTime.fromJSDate(new Date(latestTs)).setZone('Asia/Kolkata');
+
+        // Get data from the most recent 24-hour period that has data
+        const cutoff = latestDate.minus({ hours: 24 }).toISO();
+        const upperBound = latestDate.toISO();
+
+        const params = sensor ? ['minute', cutoff, upperBound, maxPoints, sensor] : ['minute', cutoff, upperBound, maxPoints];
+        const r = await pool.query(`
+            SELECT date_trunc($1, timestamp AT TIME ZONE 'Asia/Kolkata') AS bucket,
+                   AVG(rms_v) AS avg_rms_v, COUNT(*) AS sample_count
+            FROM realtime_data
+            WHERE rms_v IS NOT NULL AND rms_v > 0
+              AND timestamp >= $2 AND timestamp <= $3
+              ${sensor ? 'AND sensor = $5' : ''}
+            GROUP BY bucket ORDER BY bucket DESC LIMIT $4
+        `, params);
+
+        if (!r.rows.length) {
+            return res.json({ points: [], sampleCount: 0, sensor: sensor || 'all' });
+        }
+
+        const points = r.rows.map(row => ({
+            timestamp: row.bucket,
+            rms_v_g:   parseFloat(parseFloat(row.avg_rms_v).toFixed(5)),
+            n:         parseInt(row.sample_count)
+        }));
+
+        console.log(`[RCI last-available] Returning ${points.length} points from ${latestDate.toFormat('yyyy-MM-dd HH:mm')}`);
+        res.json({ points, sampleCount: points.length, sensor: sensor || 'all', latest_timestamp: latestTs });
+    } catch (e) {
+        console.error('/api/rci/last-available error:', e.message);
+        res.status(500).json({ error: e.message, points: [] });
+    }
+});
+
 app.post('/api/device/reset', (_req, res) => {
     mqttClient.publish('adj/datalogger/client_request', 'RESET', { qos: 1 }, (err) => {
         if (err) { console.error('RESET publish error:', err.message); return res.status(500).json({ success: false, error: err.message }); }
@@ -1520,6 +1581,46 @@ app.get('/api/map/events', async (req, res) => {
         })));
     } catch (e) {
         console.error('/api/map/events error:', e.message);
+        res.status(500).json([]);
+    }
+});
+
+app.get('/api/events', async (req, res) => {
+    try {
+        if (!pgReady) return res.json([]);
+        const params = [];
+        let where = 'WHERE 1=1';
+
+        if (req.query.startTime) {
+            params.push(req.query.startTime);
+            where += ` AND timestamp >= $${params.length}`;
+        }
+        if (req.query.endTime) {
+            params.push(req.query.endTime);
+            where += ` AND timestamp <= $${params.length}`;
+        }
+        if (req.query.minDistance != null) {
+            params.push(parseFloat(req.query.minDistance));
+            where += ` AND distance_m >= $${params.length}`;
+        }
+        if (req.query.maxDistance != null) {
+            params.push(parseFloat(req.query.maxDistance));
+            where += ` AND distance_m < $${params.length}`;
+        }
+
+        const r = await pool.query(`
+            SELECT id, timestamp, sensor, severity, peak_g, g_force,
+                   rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l,
+                   x, y, z, fs, window_ms, distance_m, p_class, lat, lng
+            FROM accelerometer_events
+            ${where}
+            ORDER BY timestamp DESC
+            LIMIT 1000
+        `, params);
+
+        res.json(r.rows);
+    } catch (e) {
+        console.error('/api/events error:', e.message);
         res.status(500).json([]);
     }
 });
@@ -2654,9 +2755,11 @@ function kmSplitRecordsByDistance(docs, kmStart, blockLengths) {
         return slice;
     });
 }
-function kmAvgVal(arr) {
+// rms/sd for a block now take the MAXIMUM value recorded, not the average
+// — matches the same change in acceleration-km.js's computeBlock().
+function kmMaxVal(arr) {
     const valid = arr.filter(v => v != null && !isNaN(v));
-    return valid.length ? valid.reduce((s, x) => s + x, 0) / valid.length : null;
+    return valid.length ? Math.max(...valid) : null;
 }
 function kmComputeBlock(docs, blkIdx) {
     const left  = docs.filter(d => d.device_id === 'left');
@@ -2665,9 +2768,9 @@ function kmComputeBlock(docs, blkIdx) {
     const pick  = (arr, f) => arr.map(d => d[f]).filter(v => v != null);
     return {
         label: `BLK${blkIdx + 1}`,
-        left:  { rmsV: kmAvgVal(pick(left, 'rmsV')),  rmsL: kmAvgVal(pick(left, 'rmsL')),  sdV: kmAvgVal(pick(left, 'sdV')),  sdL: kmAvgVal(pick(left, 'sdL')) },
-        right: { rmsV: kmAvgVal(pick(right, 'rmsV')), rmsL: kmAvgVal(pick(right, 'rmsL')), sdV: kmAvgVal(pick(right, 'sdV')), sdL: kmAvgVal(pick(right, 'sdL')) },
-        pivot: { rmsV: kmAvgVal(pick(pivot, 'rmsV')), rmsL: kmAvgVal(pick(pivot, 'rmsL')), sdV: kmAvgVal(pick(pivot, 'sdV')), sdL: kmAvgVal(pick(pivot, 'sdL')) },
+        left:  { rmsV: kmMaxVal(pick(left, 'rmsV')),  rmsL: kmMaxVal(pick(left, 'rmsL')),  sdV: kmMaxVal(pick(left, 'sdV')),  sdL: kmMaxVal(pick(left, 'sdL')) },
+        right: { rmsV: kmMaxVal(pick(right, 'rmsV')), rmsL: kmMaxVal(pick(right, 'rmsL')), sdV: kmMaxVal(pick(right, 'sdV')), sdL: kmMaxVal(pick(right, 'sdL')) },
+        pivot: { rmsV: kmMaxVal(pick(pivot, 'rmsV')), rmsL: kmMaxVal(pick(pivot, 'rmsL')), sdV: kmMaxVal(pick(pivot, 'sdV')), sdL: kmMaxVal(pick(pivot, 'sdL')) },
     };
 }
 function kmGetAxisLimitBand(side, axisLetter) {
@@ -2731,18 +2834,15 @@ function kmComputeWorstPeaks(docs, kmStart) {
         if (d.y_axis != null) buckets[vertKey].push({ value: +Math.abs(d.y_axis).toFixed(2), meter });
     }
 
-    function dedupeByMeterKeepMax(entries) {
-        const byMeter = new Map();
-        for (const e of entries) {
-            const existing = byMeter.get(e.meter);
-            if (e.meter == null || !existing || e.value > existing.value) byMeter.set(e.meter === null ? Symbol() : e.meter, e);
-        }
-        return [...byMeter.values()];
-    }
-
+    // No meter-based dedupe: real-world distance_m jitters slightly even
+    // while parked (GPS noise / rounding), which was enough to defeat a
+    // "distinct meter count" heuristic and keep collapsing genuine high-g
+    // events into 1-2 survivors per parameter. Worst Peaks exists to show
+    // the actual highest recorded readings, so every raw sample competes
+    // on value alone now — top 10 by |value|, regardless of distance_m.
     const out = empty();
     for (const k of keys) {
-        out[k] = dedupeByMeterKeepMax(buckets[k]).sort((a, b) => b.value - a.value).slice(0, 10);
+        out[k] = buckets[k].sort((a, b) => b.value - a.value).slice(0, 10);
     }
     return out;
 }

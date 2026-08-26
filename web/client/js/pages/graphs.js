@@ -609,10 +609,16 @@ const socket = io(SERVER_URL, { transports: ['websocket', 'polling'], reconnecti
 socket.on('connect', () => console.log('[graphs] Socket connected ✓'));
 socket.on('disconnect', () => console.warn('[graphs] Disconnected'));
 
-// Real GPS-based distance (server-tracked totalDistanceM) — replaces the old
-// synthetic +10m-per-accel-packet counter, which drifted at whatever rate
-// the accel socket happened to emit rather than actual distance traveled.
+// Server-tracked totalDistanceM — replaces the old synthetic +10m-per-accel-
+// packet counter, which drifted at whatever rate the accel socket happened
+// to emit rather than actual distance traveled. Now sourced from the
+// odometer encoder (direct wheel-rotation measurement) rather than GPS
+// Haversine-diffing, which was noisy/stuck-at-0 at low speed — but gps-data
+// still carries the last-known value too, so either event keeps this in sync.
 socket.on('gps-data', data => {
+    if (typeof data.totalDistanceM === 'number') distanceM = data.totalDistanceM;
+});
+socket.on('odometer-data', data => {
     if (typeof data.totalDistanceM === 'number') distanceM = data.totalDistanceM;
 });
 

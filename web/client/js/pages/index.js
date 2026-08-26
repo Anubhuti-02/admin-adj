@@ -570,6 +570,12 @@ function connectToBackend() {
     });
 
     socket.on('gps-data',    data   => updateGPSDisplay(data));
+    socket.on('odometer-data', data => {
+        const odoSpeedEl = document.getElementById('odoSpeed');
+        if (odoSpeedEl && data.ok && data.speedKmh != null) {
+            odoSpeedEl.textContent = (+data.speedKmh).toFixed(2) + ' km/h';
+        }
+    });
     socket.on('new-impact',  impact => addImpactAlert(impact));
 
     socket.on('display-reset', () => {

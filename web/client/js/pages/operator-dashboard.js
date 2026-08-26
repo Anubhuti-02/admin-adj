@@ -93,7 +93,6 @@ function applyStats(stats) {
     const lastP = stats.lastPeak ?? 0;
     const pCls  = stats.lastPeakClass || '—';
     const distM = stats.totalDistanceM ?? 0;
-    const speedDistM = stats.speedDistanceM ?? 0;
 
     setText('impactsToday', total);
     setText('highSeverity', high);
@@ -108,7 +107,6 @@ function applyStats(stats) {
     }
     setText('totalDistance', (+distM).toFixed(1) + ' m');
     setText('distanceKm', (distM / 1000).toFixed(3) + ' km');
-    setText('speedDistance', (speedDistM / 1000).toFixed(3) + ' km');
 }
 
 async function refreshStats() {

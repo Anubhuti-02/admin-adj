@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Logs - RailMonitor</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="../css/common.css">
+    <link rel="stylesheet" href="../css/pages/logs.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="header-left">
+                <h1>Live Logs</h1>
+                <div class="live-row">
+                    <span id="liveDot" class="live-dot"></span>
+                    <span id="connStatus" class="conn-status conn-off">Connecting…</span>
+                </div>
+            </div>
+            <div class="filters">
+                <button id="pauseBtn"><i class="fas fa-pause"></i> Pause</button>
+                <button id="clearBtn"><i class="fas fa-trash"></i> Clear</button>
+            </div>
+        </div>
+
+        <div class="log-panel">
+            <div class="log-panel-header">
+                <i class="fas fa-tachometer-alt"></i> Odometer
+                <span class="log-count" id="odoCount">0 readings</span>
+            </div>
+            <div class="log-console" id="odoConsole"></div>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script src="../js/common.js"></script>
+    <script src="../js/pages/logs.js"></script>
+</body>
+</html>

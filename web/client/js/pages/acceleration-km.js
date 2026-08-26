@@ -18,27 +18,29 @@
     // ═════════════════════════════════════════════════════════════════════
     // ── DISTANCE-BASED BUCKETING (the only path) ───────────────────────────
     // Each monitoring_data row carries its own real distance_m, stamped
-    // server-side from live GPS (production) or simulate-distance.js (bench
-    // testing). We equalize the route tape's real meter values directly
-    // against each record's own distance_m — so a record only lands in a
-    // block/KM if its measured position actually falls inside that
-    // block/KM's real span. There is no record-count estimation anywhere in
-    // this file: if a session hasn't shown real distance movement yet, the
-    // report waits instead of guessing.
+    // server-side from the odometer encoder (server.js's totalDistanceM,
+    // updated on every ENCODER,... reading — see handleOdometerSocket) or
+    // simulate-distance.js (bench testing). We equalize the route tape's
+    // real meter values directly against each record's own distance_m — so
+    // a record only lands in a block/KM if its measured position actually
+    // falls inside that block/KM's real span. There is no record-count
+    // estimation anywhere in this file: if a session hasn't shown real
+    // distance movement yet, the report waits instead of guessing.
     // ═════════════════════════════════════════════════════════════════════
 
     // "Real" distance means the system is moving RIGHT NOW — checked via the
     // most recent record only, not "has any record in this batch ever shown
     // distance_m > 0". That distinction matters: if simulate-distance.js (or
-    // real GPS) was active earlier in this same uninterrupted run and then
-    // stopped, the sensor keeps streaming — but every NEW row reverts to
-    // distance_m = 0 (server.js's own totalDistanceM only advances on a real
-    // GPS fix; simulate-distance.js only patches the DB directly, it doesn't
-    // touch that in-memory value). A stale non-zero record from earlier in
-    // the run would otherwise wrongly commit the whole batch to
-    // distance-based bucketing, and every current static record (distance_m
-    // = 0) would pile into BLK1. Checking only the latest record reflects
-    // "is it dynamic right now" — exactly what should decide the mode.
+    // the real odometer) was active earlier in this same uninterrupted run
+    // and then stopped, the sensor keeps streaming — but every NEW row
+    // reverts to distance_m = 0 (server.js's own totalDistanceM only
+    // advances on a new encoder reading; simulate-distance.js only patches
+    // the DB directly, it doesn't touch that in-memory value). A stale
+    // non-zero record from earlier in the run would otherwise wrongly commit
+    // the whole batch to distance-based bucketing, and every current static
+    // record (distance_m = 0) would pile into BLK1. Checking only the latest
+    // record reflects "is it dynamic right now" — exactly what should decide
+    // the mode.
     function hasDistanceData(docs) {
         if (!docs.length) return false;
         const latest = docs[docs.length - 1]; // docs are timestamp-sorted asc

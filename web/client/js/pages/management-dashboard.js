@@ -231,6 +231,10 @@ setInterval(() => {
 }, 1000);
 
 // ── GPS ────────────────────────────────────────────────────────────────────
+// Distance and Speed (Odometer) come from /api/latest/odometer instead of
+// the GPS fix — GPS fixes arrive far less often than encoder readings, so a
+// distance/speed reading off rm_gps only updated on each new GPS fix,
+// lagging/looking frozen between fixes even while the vehicle kept moving.
 async function fetchGPS() {
     try {
         const d = await fetch(`${API}/api/latest/gps`).then(r => r.json());
@@ -245,8 +249,6 @@ async function fetchGPS() {
         document.getElementById('gps-lat').textContent      = lat;
         document.getElementById('gps-lng').textContent      = lng;
         document.getElementById('gps-speed').textContent    = `${d.speedKmh} km/h`;
-        document.getElementById('gps-distance').textContent = `${(d.totalDistanceM / 1000).toFixed(2)} km`;
-        document.getElementById('gps-speed-distance').textContent = `${(d.speedDistanceM / 1000).toFixed(2)} km`;
         document.getElementById('gps-lastfix').textContent  = ts.toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false });
 
         const statusEl = document.getElementById('gps-status');
@@ -257,12 +259,23 @@ async function fetchGPS() {
     } catch (e) { console.error('gps fetch error:', e); }
 }
 
+async function fetchOdometer() {
+    try {
+        const d = await fetch(`${API}/api/latest/odometer`).then(r => r.json());
+        if (!d) return;
+        document.getElementById('gps-distance').textContent = `${(d.totalDistanceM / 1000).toFixed(2)} km`;
+        const el = document.getElementById('odo-speed');
+        if (el) el.textContent = `${(+d.speedKmh).toFixed(2)} km/h`;
+    } catch (e) { console.error('odometer fetch error:', e); }
+}
+
 // ── Initial load ──────────────────────────────────────────────────────────
 fetchUptime();
 fetchActiveSensors();
 fetchActiveAlerts();
 fetchSystemHealth();
 fetchGPS();
+fetchOdometer();
 
 // The chart itself is fully live/socket-driven (pushChartPoint, wired to
 // 'accelerometer-data' below) — these are the other panels, which don't
@@ -271,6 +284,7 @@ setInterval(() => {
     fetchActiveSensors();
     fetchSystemHealth();
     fetchGPS();
+    fetchOdometer();
 }, 3000);
 setInterval(() => {
     fetchUptime();
@@ -283,6 +297,10 @@ socket.on('connect', () => console.log('[mgmt] Socket connected ✓'));
 socket.on('disconnect', () => console.warn('[mgmt] Disconnected'));
 socket.on('accelerometer-data', data => {
     pushChartPoint(data.sensor, data.peak ?? data.gForce ?? 0);
+});
+socket.on('odometer-data', data => {
+    const el = document.getElementById('odo-speed');
+    if (el && data.ok && data.speedKmh != null) el.textContent = `${(+data.speedKmh).toFixed(2)} km/h`;
 });
 
 // ── View Details — opens the full-screen sensor chart in a new browser tab ──

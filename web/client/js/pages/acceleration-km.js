@@ -42,7 +42,7 @@
     function hasDistanceData(docs) {
         if (!docs.length) return false;
         const latest = docs[docs.length - 1]; // docs are timestamp-sorted asc
-        return latest.distance_m != null && latest.distance_m > 0;
+        return latest.distance_m != null && latest.distance_m >= 0;
     }
 
     // Cumulative real distance (m) at the START of route-tape KM index idx,
@@ -94,7 +94,7 @@
     function resolveCurrentKm(sessionDocs) {
         if (!sessionDocs.length) return { usedDistance: false };
         const latest = sessionDocs[sessionDocs.length - 1]; // timestamp-sorted asc
-        if (latest.distance_m != null && latest.distance_m > 0) {
+        if (latest.distance_m != null && latest.distance_m >= 0) {
             return { usedDistance: true, loc: routeTapeKmForDistance(latest.distance_m) };
         }
         return { usedDistance: false };
@@ -105,7 +105,7 @@
     // (updateReport) only invokes this once resolveCurrentKm() has confirmed
     // real distance data exists for the session. Empty blocks render as
     // dashes (no "Collecting…" placeholder).
-    function buildRouteTapeCard(kmDocsSlice, kmNum, kmStart, hwLive) {
+    function buildRouteTapeCard(kmDocsSlice, kmNum, kmStart, hwLive, worstPeaksScopeDocs) {
         const L = routeTapeData.kmLengths[kmNum];
         const kmEnd = kmStart + L;
         const blockLengths = blocksForKmLength(L);
@@ -126,7 +126,20 @@
 
         const isDn = routeTapeData.direction === 'DN';
         const distanceCoveredM = Math.max(0, maxDist - kmStart);
-        const worstPeaks = computeWorstPeaks(kmDocsSlice, kmStart);
+        // Worst Peaks is scoped strictly to THIS KM's real distance range
+        // [kmStart, kmEnd). While the system is LIVE, source it from
+        // kmDocsSlice — the current session's own records for this km —
+        // so the numbers actually move with real-time readings instead of
+        // sitting fixed at whatever was worst across all past
+        // sessions/days. When offline, prefer the caller-supplied
+        // worstPeaksScopeDocs (e.g. today's docs only) if given, so the
+        // report stays scoped to today's date instead of silently reaching
+        // back into all-time history. Only true historical/CSV-export call
+        // sites (which don't pass this) fall back to scanning allDocs.
+        const worstPeaksSourceDocs = hwLive
+            ? kmDocsSlice
+            : (worstPeaksScopeDocs || allDocs).filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
+        const worstPeaks = computeWorstPeaks(worstPeaksSourceDocs);
 
         return {
             kmFrom:        kmNum,
@@ -287,9 +300,13 @@
     }
 
     // ─── Computation helpers ───────────────────────────────────────────────
-    function avg(arr) {
+    // rms/sd for a block now take the MAXIMUM value recorded, not the
+    // average — a block should reflect its worst rms/sd reading, same
+    // reasoning as Worst Peaks showing real highest values rather than a
+    // smoothed-out mean.
+    function maxVal(arr) {
         const valid = arr.filter(v => v != null && !isNaN(v));
-        return valid.length ? valid.reduce((s, x) => s + x, 0) / valid.length : null;
+        return valid.length ? Math.max(...valid) : null;
     }
     function computeBlock(docs, blkIdx) {
         const left  = docs.filter(d => d.device_id === 'left');
@@ -299,22 +316,22 @@
         return {
             label: `BLK${blkIdx + 1}`,
             left: {
-                rmsV: avg(pick(left, 'rmsV')),
-                rmsL: avg(pick(left, 'rmsL')),
-                sdV:  avg(pick(left, 'sdV')),
-                sdL:  avg(pick(left, 'sdL')),
+                rmsV: maxVal(pick(left, 'rmsV')),
+                rmsL: maxVal(pick(left, 'rmsL')),
+                sdV:  maxVal(pick(left, 'sdV')),
+                sdL:  maxVal(pick(left, 'sdL')),
             },
             right: {
-                rmsV: avg(pick(right, 'rmsV')),
-                rmsL: avg(pick(right, 'rmsL')),
-                sdV:  avg(pick(right, 'sdV')),
-                sdL:  avg(pick(right, 'sdL')),
+                rmsV: maxVal(pick(right, 'rmsV')),
+                rmsL: maxVal(pick(right, 'rmsL')),
+                sdV:  maxVal(pick(right, 'sdV')),
+                sdL:  maxVal(pick(right, 'sdL')),
             },
             pivot: {
-                rmsV: avg(pick(pivot, 'rmsV')),
-                rmsL: avg(pick(pivot, 'rmsL')),
-                sdV:  avg(pick(pivot, 'sdV')),
-                sdL:  avg(pick(pivot, 'sdL')),
+                rmsV: maxVal(pick(pivot, 'rmsV')),
+                rmsL: maxVal(pick(pivot, 'rmsL')),
+                sdV:  maxVal(pick(pivot, 'sdV')),
+                sdL:  maxVal(pick(pivot, 'sdL')),
             }
         };
     }
@@ -452,7 +469,7 @@
     // dedupe, a pure value-sort can fill all 10 slots from one GPS-static
     // window; deduping first spreads the top 10 across as many distinct
     // meters as actually exist in the KM's data.
-    function computeWorstPeaks(docs, kmStart) {
+    function computeWorstPeaks(docs) {
         const keys = ['L-LAT', 'L-VERT', 'R-LAT', 'R-VERT', 'P-LAT', 'P-VERT'];
         const empty = () => Object.fromEntries(keys.map(k => [k, []]));
         if (!docs || !docs.length) return empty();
@@ -462,24 +479,29 @@
             const side = d.device_id === 'right' ? 'right' : (d.device_id === 'pivot' ? 'pivot' : 'left');
             const latKey  = side === 'left' ? 'L-LAT'  : side === 'right' ? 'R-LAT'  : 'P-LAT';
             const vertKey = side === 'left' ? 'L-VERT' : side === 'right' ? 'R-VERT' : 'P-VERT';
-            const meter = (d.distance_m != null && kmStart != null) ? Math.round(d.distance_m - kmStart) : null;
-            if (d.x_axis != null) buckets[latKey].push({ value: +Math.abs(d.x_axis).toFixed(2), meter });
-            if (d.y_axis != null) buckets[vertKey].push({ value: +Math.abs(d.y_axis).toFixed(2), meter });
+            // Absolute distance_m (real ground-truth meter, not relative to
+            // kmStart) — the caller (buildRouteTapeCard) now already scopes
+            // the docs passed in to this KM's real [kmStart, kmEnd) range
+            // from the RT file, so the raw distance_m doubles as a
+            // human-readable meter within that KM. Shown whenever
+            // distance_m is present, whether climbing (train moving) or
+            // flat (stationary).
+            const meter = d.distance_m != null ? Math.round(d.distance_m) : null;
+            if (d.x_axis != null) buckets[latKey].push({ value: +Math.abs(d.x_axis).toFixed(2), meter, timestamp: d.timestamp });
+            if (d.y_axis != null) buckets[vertKey].push({ value: +Math.abs(d.y_axis).toFixed(2), meter, timestamp: d.timestamp });
         }
 
-        function dedupeByMeterKeepMax(entries) {
-            const byMeter = new Map();
-            for (const e of entries) {
-                const k = e.meter; // null meters (no distance) each stay distinct — nothing to collapse them by
-                const existing = byMeter.get(k);
-                if (k == null || !existing || e.value > existing.value) byMeter.set(k === null ? Symbol() : k, e);
-            }
-            return [...byMeter.values()];
-        }
-
+        // No meter-based dedupe: real-world distance_m jitters slightly
+        // even while parked (GPS noise, simulate-distance rounding), which
+        // was enough to defeat a "distinct meter count" heuristic and keep
+        // collapsing genuine high-g events down to 1-2 survivors per
+        // parameter. The Worst Peaks table's whole purpose is to show the
+        // actual highest recorded readings, so every raw sample now
+        // competes on value alone — top 10 by |value|, period, regardless
+        // of where distance_m happens to be.
         const out = empty();
         for (const k of keys) {
-            out[k] = dedupeByMeterKeepMax(buckets[k]).sort((a, b) => b.value - a.value).slice(0, 10);
+            out[k] = buckets[k].sort((a, b) => b.value - a.value).slice(0, 10);
         }
         return out;
     }
@@ -573,8 +595,15 @@
             const vals = worstPeaks[param] || [];
             const cells = Array.from({length: 10}, (_, i) => {
                 const v = vals[i];
-                const text = v ? `${fmt(v.value,2)}${v.meter != null ? '/' + v.meter : ''}` : '—';
-                return `<td class="${v ? peakClass(v.value) : ''}">${text}</td>`;
+                if (!v) return `<td>—</td>`;
+                // "value g @ meter m" — meter is the real distance_m where
+                // that peak was recorded (see computeWorstPeaks()), shown
+                // whenever distance_m exists on the record, whether the
+                // train is moving (meter climbs peak to peak) or parked
+                // (meter stays flat, still shown rather than hidden).
+                const text = `${fmt(v.value,2)}${v.meter != null ? `/${v.meter}` : ''}`;
+                const title = v.timestamp ? new Date(v.timestamp).toLocaleString() : '';
+                return `<td class="${peakClass(v.value)}" title="${title}">${text}</td>`;
             }).join('');
             return `<tr><td>${param}</td>${cells}</tr>`;
         }).join('');
@@ -722,7 +751,7 @@
     // recorded across the whole database.
     function findLastDistanceAnchorIdx(docsAll) {
         for (let i = docsAll.length - 1; i >= 0; i--) {
-            if (docsAll[i].distance_m != null && docsAll[i].distance_m > 0) return i;
+            if (docsAll[i].distance_m != null && docsAll[i].distance_m >= 0) return i;
         }
         return -1;
     }
@@ -886,8 +915,20 @@
                     lastCard = card;
                     renderCard(card);
                 }
+            } else if (lastCard) {
+                // Just went offline (or reloaded while a live card was
+                // already cached) — freeze exactly what was last showing
+                // live instead of recomputing a different "last completed
+                // km" card. Only setStatus() runs here so the LIVE/OFFLINE
+                // badge and auto-save-on-disconnect logic still fire
+                // correctly; the card itself, its blocks, peak
+                // distribution, and worst peaks are left untouched.
+                setStatus(hwLive);
+                renderCard(lastCard);
             } else {
-                // Offline but today has data: show last completed route-tape KM if any
+                // No live card cached yet (e.g. fresh page load while
+                // hardware is already offline) — fall back to showing the
+                // last completed route-tape KM, same as before.
                 const completedIdx = resolved.loc ? resolved.loc.kmIdx : routeTapeKmNums.length;
                 if (completedIdx > 0) {
                     const lastIdx = completedIdx - 1;
@@ -895,7 +936,7 @@
                     const kmStart = cumulativeDistanceStart(lastIdx);
                     const kmEnd = kmStart + routeTapeData.kmLengths[lastKm];
                     const lastKmDocs = sessionDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
-                    const card = buildRouteTapeCard(lastKmDocs, lastKm, kmStart, false);
+                    const card = buildRouteTapeCard(lastKmDocs, lastKm, kmStart, false, todayDocs);
                     card.historical = false;
                     setStatus(hwLive);
                     setToolbarCount(completedIdx);
@@ -904,7 +945,7 @@
                 } else {
                     const firstKm = routeTapeKmNums[0];
                     const kmDocsSlice = sessionDocs.filter(d => d.distance_m != null && d.distance_m < routeTapeData.kmLengths[firstKm]);
-                    const card = buildRouteTapeCard(kmDocsSlice, firstKm, 0, false);
+                    const card = buildRouteTapeCard(kmDocsSlice, firstKm, 0, false, todayDocs);
                     card.historical = false;
                     setStatus(hwLive);
                     setToolbarCount(0);

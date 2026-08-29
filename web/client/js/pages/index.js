@@ -575,6 +575,15 @@ function connectToBackend() {
         if (odoSpeedEl && data.ok && data.speedKmh != null) {
             odoSpeedEl.textContent = (+data.speedKmh).toFixed(2) + ' km/h';
         }
+
+        // Distance travelled (left panel) — straight from the odometer
+        // encoder's own km/meter/mm fields (odometer_data table), not the
+        // derived monitoring_data distance_m. Single line: "X km Y m Z mm".
+        const distanceEl = document.getElementById('leftDistance');
+        if (distanceEl && data.ok && data.km != null) {
+            currentDistanceM = data.km * 1000 + data.meter + data.mm / 1000;
+            distanceEl.textContent = `${data.km} km ${data.meter} m ${data.mm} mm`;
+        }
     });
     socket.on('new-impact',  impact => addImpactAlert(impact));
 

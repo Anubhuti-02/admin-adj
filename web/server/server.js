@@ -2428,6 +2428,20 @@ app.post('/api/reset', async (req, res) => {
             savePeaksLog(peaksLog);
             console.log('[reset] JSON fallback cleared');
         }
+        // BUG FIX: this handler used to leave totalDistanceM (and the GPS
+        // fix state it's integrated from) completely untouched — so even a
+        // full DB reset carried the old session's accumulated distance
+        // straight into the new one. The very next GPS fix would insert a
+        // monitoring_data row starting from e.g. 89m instead of 0m, even
+        // though every other display looked freshly reset. lastGpsCoord/
+        // lastGpsFixAt are cleared too so accumulateGpsDistance()'s elapsed-
+        // time calc doesn't compute a bogus huge gap against a pre-reset fix
+        // (it already guards dtSec > GPS_DISTANCE_MAX_GAP_S, but there's no
+        // reason to rely on that guard here when a clean restart is correct).
+        totalDistanceM = 0;
+        lastGpsCoord   = null;
+        lastGpsFixAt   = 0;
+        console.log('[reset] totalDistanceM and GPS fix state cleared');
         const zeroStats = { total: 0, highSeverity: 0, medium: 0, low: 0, maxPeak: 0, avgPeak: 0, source: 'reset' };
         io.emit('stats-update', zeroStats);
         io.emit('display-reset', { saveToDb });

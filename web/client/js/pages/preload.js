@@ -212,19 +212,19 @@ async function preloadGPS() {
 // not monitoring_data's derived distance_m — same source the live
 // 'odometer-data' socket handler in index.js uses, so the on-load value and
 // the first live update never disagree.
-async function preloadOdometerDistance() {
-    try {
-        const res = await fetch(`${PRELOAD_SERVER}/api/latest/odometer`);
-        const odo = await res.json();
-        if (!odo || odo.km == null) return;
+// async function preloadOdometerDistance() {
+//     try {
+//         const res = await fetch(`${PRELOAD_SERVER}/api/latest/odometer`);
+//         const odo = await res.json();
+//         if (!odo || odo.km == null) return;
 
-        _set('leftDistance', `${odo.km} km ${odo.meter} m ${odo.mm} mm`);
+//         _set('leftDistance', `${odo.km} km ${odo.meter} m ${odo.mm} mm`);
 
-        console.log('[preload] Last saved odometer distance populated from DB');
-    } catch (e) {
-        console.warn('[preload] Odometer distance fetch failed:', e.message);
-    }
-}
+//         console.log('[preload] Last saved odometer distance populated from DB');
+//     } catch (e) {
+//         console.warn('[preload] Odometer distance fetch failed:', e.message);
+//     }
+// }
 
 // ── 6. Pre-populate health grid ───────────────────────────────────────────
 window.preloadHealth = async function() {
@@ -249,7 +249,7 @@ document.addEventListener('DOMContentLoaded', () => {
     preloadStats();
     preloadAlerts();
     preloadGPS();
-    preloadOdometerDistance();
+  //  preloadOdometerDistance();
     // preloadHealth and preloadGraphHistory are called by their respective
     // page JS files after charts/health grid are initialized
 });

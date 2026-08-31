@@ -18,23 +18,23 @@
     // ═════════════════════════════════════════════════════════════════════
     // ── DISTANCE-BASED BUCKETING (the only path) ───────────────────────────
     // Each monitoring_data row carries its own real distance_m, stamped
-    // server-side from the odometer encoder (server.js's totalDistanceM,
-    // updated on every ENCODER,... reading — see handleOdometerSocket) or
-    // simulate-distance.js (bench testing). We equalize the route tape's
-    // real meter values directly against each record's own distance_m — so
-    // a record only lands in a block/KM if its measured position actually
-    // falls inside that block/KM's real span. There is no record-count
-    // estimation anywhere in this file: if a session hasn't shown real
-    // distance movement yet, the report waits instead of guessing.
+    // server-side from GPS speed×time accumulation (server.js's
+    // totalDistanceM, updated on every GPS fix) or simulate-distance.js
+    // (bench testing). We equalize the route tape's real meter values
+    // directly against each record's own distance_m — so a record only
+    // lands in a block/KM if its measured position actually falls inside
+    // that block/KM's real span. There is no record-count estimation
+    // anywhere in this file: if a session hasn't shown real distance
+    // movement yet, the report waits instead of guessing.
     // ═════════════════════════════════════════════════════════════════════
 
     // "Real" distance means the system is moving RIGHT NOW — checked via the
     // most recent record only, not "has any record in this batch ever shown
     // distance_m > 0". That distinction matters: if simulate-distance.js (or
-    // the real odometer) was active earlier in this same uninterrupted run
+    // the real GPS feed) was active earlier in this same uninterrupted run
     // and then stopped, the sensor keeps streaming — but every NEW row
     // reverts to distance_m = 0 (server.js's own totalDistanceM only
-    // advances on a new encoder reading; simulate-distance.js only patches
+    // advances on a new GPS fix; simulate-distance.js only patches
     // the DB directly, it doesn't touch that in-memory value). A stale
     // non-zero record from earlier in the run would otherwise wrongly commit
     // the whole batch to distance-based bucketing, and every current static
@@ -141,7 +141,7 @@
         const worstPeaksSourceDocs = hwLive
             ? kmDocsSlice
             : (worstPeaksScopeDocs || allDocs).filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
-        const worstPeaks = computeWorstPeaks(worstPeaksSourceDocs);
+        const worstPeaks = computeWorstPeaks(worstPeaksSourceDocs, kmStart);
 
         return {
             kmFrom:        kmNum,
@@ -198,7 +198,7 @@
     // Wall-clock moment (Date.now()) the CURRENT run started, or null if no
     // reset has happened yet (default: use the whole day's data, exactly the
     // legacy behavior). Set by resetRunState() — new route tape upload, or
-    // the odometer going from stopped back to moving. Docs timestamped
+    // GPS going from stopped back to moving. Docs timestamped
     // before this are excluded from todayDocs below, so a fresh run can't
     // immediately re-absorb an earlier-today run's records just because
     // they happen to share the same calendar day and a low distance_m.
@@ -235,12 +235,12 @@
 
     // Shared full reset of everything tied to "the current run" — called
     // both when a new route tape is uploaded (old tape's KM numbering is
-    // meaningless against the new one) and when the odometer goes from
-    // stopped back to moving (per requirement: each stop/start cycle is
-    // treated as an independent fresh run, not a continuation). Wipes
-    // archived KM history, the in-progress card, odometer-staleness
-    // tracking, the toolbar count, and — via sessionStartTs — excludes
-    // every doc logged before this moment from the next live session.
+    // meaningless against the new one) and when GPS goes from stopped back
+    // to moving (per requirement: each stop/start cycle is treated as an
+    // independent fresh run, not a continuation). Wipes archived KM
+    // history, the in-progress card, GPS-staleness tracking, the toolbar
+    // count, and — via sessionStartTs — excludes every doc logged before
+    // this moment from the next live session.
     function resetRunState(reason) {
         console.log(`[km] Resetting run state (${reason})`);
         completedKmCards      = [];
@@ -248,8 +248,8 @@
         archivedForDate       = null;
         runComplete           = false;
         lastCard              = null;
-        lastOdometerTs        = null;
-        lastOdometerChangeAt  = Date.now();
+        lastGpsTs             = null;
+        lastGpsChangeAt       = Date.now();
         sessionStartTs        = Date.now();
         setToolbarCount(0);
     }
@@ -550,7 +550,7 @@
     // dedupe, a pure value-sort can fill all 10 slots from one GPS-static
     // window; deduping first spreads the top 10 across as many distinct
     // meters as actually exist in the KM's data.
-    function computeWorstPeaks(docs) {
+    function computeWorstPeaks(docs, kmStart) {
         const keys = ['L-LAT', 'L-VERT', 'R-LAT', 'R-VERT', 'P-LAT', 'P-VERT'];
         const empty = () => Object.fromEntries(keys.map(k => [k, []]));
         if (!docs || !docs.length) return empty();
@@ -560,14 +560,15 @@
             const side = d.device_id === 'right' ? 'right' : (d.device_id === 'pivot' ? 'pivot' : 'left');
             const latKey  = side === 'left' ? 'L-LAT'  : side === 'right' ? 'R-LAT'  : 'P-LAT';
             const vertKey = side === 'left' ? 'L-VERT' : side === 'right' ? 'R-VERT' : 'P-VERT';
-            // Absolute distance_m (real ground-truth meter, not relative to
-            // kmStart) — the caller (buildRouteTapeCard) now already scopes
-            // the docs passed in to this KM's real [kmStart, kmEnd) range
-            // from the RT file, so the raw distance_m doubles as a
-            // human-readable meter within that KM. Shown whenever
-            // distance_m is present, whether climbing (train moving) or
-            // flat (stationary).
-            const meter = d.distance_m != null ? Math.round(d.distance_m) : null;
+            // Meter relative to THIS KM's own start (0 at kmStart), not the
+            // raw absolute distance_m. distance_m is GPS speed×time
+            // accumulated from wherever the run/session began (or even
+            // carried over across a restart), so for any KM after the
+            // first, its absolute value is already >= kmStart and would
+            // show as e.g. "1346" instead of "346". Subtracting kmStart
+            // makes the meter start at 0 for this KM and count up exactly
+            // as distance_m grows — matches server.js's kmComputeWorstPeaks().
+            const meter = (d.distance_m != null && kmStart != null) ? Math.round(d.distance_m - kmStart) : null;
             if (d.x_axis != null) buckets[latKey].push({ value: +Math.abs(d.x_axis).toFixed(2), meter, timestamp: d.timestamp });
             if (d.y_axis != null) buckets[vertKey].push({ value: +Math.abs(d.y_axis).toFixed(2), meter, timestamp: d.timestamp });
         }
@@ -751,23 +752,23 @@
         container.innerHTML = liveHtml + historyHtml;
     }
 
-    // Rendered when the odometer has gone stationary (speed stuck at 0) while
-    // still mid-KM — distinct from renderRunComplete() (distance ran past the
+    // Rendered when GPS has gone stationary (speed stuck at 0) while still
+    // mid-KM — distinct from renderRunComplete() (distance ran past the
     // end of the route tape). Here the run itself has just stopped moving:
     // freeze the pts counter and swap the growing LIVE card for a plain
     // completion-style banner, same completed-KM stack underneath.
-    function renderOdometerStopped(frozenCard) {
+    function renderGpsStopped(frozenCard) {
         const container = document.getElementById('km-container');
         if (!container) return;
         const banner = `
         <div class="km-block" style="text-align:center;padding:20px;color:#16a34a">
             <i class="fas fa-flag-checkered"></i>
-            <strong> Run complete</strong> — odometer reports 0 km/h, train has stopped.
+            <strong> Run complete</strong> — GPS reports 0 km/h, train has stopped.
         </div>`;
         // Show whatever was last actually computed (the same values already
         // saved to the CSV) instead of leaving this blank — frozenCard is
-        // the in-progress current-KM card as it stood the moment the
-        // odometer went stale, not yet moved into completedKmCards.
+        // the in-progress current-KM card as it stood the moment GPS went
+        // stale, not yet moved into completedKmCards.
         const frozenHtml = frozenCard ? cardHtml(frozenCard) : '';
         container.innerHTML = banner + frozenHtml + completedKmCards.map(cardHtml).join('');
     }
@@ -851,43 +852,40 @@
     // so the full fetch is cached and only redone every FULL_REFRESH_MS
     // instead of every poll. This is what was making the page feel like it
     // was hanging: every 5s tick was re-downloading and re-parsing the
-    // ENTIRE monitoring_data + odometer_data history in the browser, and
-    // that cost only grows as the tables grow.
+    // ENTIRE monitoring_data history in the browser, and that cost only
+    // grows as the table grows.
     const FULL_REFRESH_MS = 5 * 60 * 1000; // 5 minutes
     let cachedFullDocs = [];
-    let cachedFullOdometer = [];
     let lastFullFetchAt = 0;
 
     async function fetchFullHistoryIfStale() {
         const now = Date.now();
         if (now - lastFullFetchAt < FULL_REFRESH_MS && cachedFullDocs.length) return;
         // Only stamp lastFullFetchAt on a fetch that actually succeeded —
-        // fetchRawData()/fetchOdometerData() swallow network/HTTP errors and
-        // return [] on failure (see their own try/catch), which is
-        // indistinguishable from "genuinely no rows" here. Stamping the
-        // timestamp unconditionally meant one failed/timed-out full fetch
-        // (the ORDER BY ... LIMIT 500000 query is the expensive one) would
-        // leave cachedFullDocs empty for a full FULL_REFRESH_MS with no
-        // retry — which, combined with an empty today-fetch on the same
-        // tick, is what produced "No records in database yet" while
-        // hardware was actually live and history genuinely existed.
-        let fetchedDocs, fetchedOdo;
+        // fetchRawData() swallows network/HTTP errors and returns [] on
+        // failure (see its own try/catch), which is indistinguishable from
+        // "genuinely no rows" here. Stamping the timestamp unconditionally
+        // meant one failed/timed-out full fetch (the ORDER BY ... LIMIT
+        // 500000 query is the expensive one) would leave cachedFullDocs
+        // empty for a full FULL_REFRESH_MS with no retry — which, combined
+        // with an empty today-fetch on the same tick, is what produced
+        // "No records in database yet" while hardware was actually live
+        // and history genuinely existed.
+        let fetchedDocs;
         try {
-            [fetchedDocs, fetchedOdo] = await Promise.all([
-                fetchRawDataOrThrow(),
-                fetchOdometerDataOrThrow(),
-            ]);
+            fetchedDocs = await fetchRawDataOrThrow();
         } catch (e) {
             console.warn('[km] full-history refresh failed, will retry next poll:', e.message);
             return; // lastFullFetchAt left untouched — retried next tick
         }
         lastFullFetchAt = now;
         cachedFullDocs = fetchedDocs;
-        cachedFullOdometer = fetchedOdo;
-        applyOdometerDistance(cachedFullDocs, cachedFullOdometer);
+        // distance_m is already correct straight off monitoring_data —
+        // server.js stamps it from GPS speed×time accumulation at insert
+        // time, so no further merge/lookup is needed here.
     }
 
-    // Throwing variants used only by fetchFullHistoryIfStale() above, so a
+    // Throwing variant used only by fetchFullHistoryIfStale() above, so a
     // failed fetch can be told apart from a genuinely empty result instead
     // of both collapsing to [].
     async function fetchRawDataOrThrow() {
@@ -896,75 +894,6 @@
         const data = await res.json();
         data.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
         return data;
-    }
-    async function fetchOdometerDataOrThrow() {
-        const res = await fetch('/api/odometer/all');
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        data.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-        return data;
-    }
-
-    // ── Odometer-sourced distance ───────────────────────────────────────────────
-    // Distance/speed now come from the wheel encoder (odometer_data), not GPS.
-    // monitoring_data.distance_m is still populated server-side from
-    // totalDistanceM at the moment each accelerometer row is inserted, but
-    // that's a snapshot taken at accelerometer-sample cadence — it can lag or
-    // sit stale between encoder updates. Instead we pull the FULL odometer_data
-    // series (/api/odometer/all) and, for every monitoring_data record,
-    // overwrite its distance_m with the odometer reading whose own timestamp
-    // is the closest one at-or-before that record's timestamp — i.e. "what did
-    // the encoder actually say at that moment" rather than whatever value got
-    // stamped in at insert time.
-    // odometer readings are fetched per-source (today fresh, older cached —
-    // see fetchFullHistoryIfStale()) and merged straight into each doc's
-    // distance_m via applyOdometerDistance(); no separate series is kept
-    // around after that.
-
-    async function fetchOdometerData(dateStr) {
-        try {
-            const url = dateStr ? `/api/odometer/all?date=${encodeURIComponent(dateStr)}` : '/api/odometer/all';
-            const res = await fetch(url);
-            if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const data = await res.json();
-            data.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
-            return data;
-        } catch (err) {
-            console.error('[km] fetch odometer error:', err);
-            return [];
-        }
-    }
-
-    // Binary search: index of the last odometer reading with
-    // timestamp <= targetTs, or -1 if every reading is after targetTs.
-    function findOdometerIdxAtOrBefore(series, targetTs) {
-        let lo = 0, hi = series.length - 1, ans = -1;
-        while (lo <= hi) {
-            const mid = (lo + hi) >> 1;
-            if (series[mid].timestamp <= targetTs) { ans = mid; lo = mid + 1; }
-            else hi = mid - 1;
-        }
-        return ans;
-    }
-
-    // Overwrites each doc's distance_m in place with the odometer's own
-    // reading at-or-nearest that doc's timestamp. If a doc's timestamp is
-    // earlier than every odometer reading we've ever logged (e.g. right at
-    // startup, before the first ENCODER line arrives), falls back to the
-    // FIRST odometer reading rather than leaving distance_m null — matches
-    // "hasn't moved yet" (0-ish distance) instead of dropping the record
-    // from every distance-based bucket. If odometer_data is empty entirely,
-    // docs are left untouched (their existing monitoring_data distance_m,
-    // if any, is kept as a last resort).
-    function applyOdometerDistance(docs, series) {
-        if (!series.length) return docs;
-        for (const d of docs) {
-            const idx = findOdometerIdxAtOrBefore(series, d.timestamp);
-            const reading = idx >= 0 ? series[idx] : series[0];
-            d.distance_m = reading.distance_m;
-            d.speed_kmh = reading.speedKmh;
-        }
-        return docs;
     }
 
     async function fetchLiveStatus() {
@@ -977,32 +906,28 @@
         }
     }
 
-    // ── Odometer-stopped detection ──────────────────────────────────────────────
-    // server.js now skips DB insert + socket broadcast for any packet where
-    // speed is genuinely 0 (train stationary) — see handleOdometerSocket()'s
-    // isStopped guard. That means /api/latest/odometer's speedKmh field is
-    // NOT reliable for detecting "stopped": it just freezes at whatever the
-    // last real (moving) reading was and never itself reports 0. What DOES
-    // change is that its timestamp stops advancing — no new odometer rows
-    // are being written at all while stationary. So "stopped" is detected as
-    // "the latest odometer timestamp hasn't changed for ODOMETER_STALE_MS",
-    // not by reading speedKmh directly.
-    const ODOMETER_STALE_MS = 12000; // > 2x POLL_MS(5000) to absorb normal jitter
-    let lastOdometerTs = null;
-    let lastOdometerChangeAt = Date.now();
-    let wasOdometerStopped = false; // tracks the previous tick's stopped state, to detect the resume EDGE
-    async function isOdometerStopped() {
+    // ── GPS-stopped detection ───────────────────────────────────────────────────
+    // "Stopped" is detected from the GPS fix stream: /api/latest/gps
+    // returns the most recent rm_gps row, and its timestamp simply stops
+    // advancing once the GPS board stops sending fixes or the vehicle is
+    // stationary long enough that nothing new comes in. So "stopped" means
+    // "the latest GPS fix timestamp hasn't changed for GPS_STALE_MS".
+    const GPS_STALE_MS = 12000; // > 2x POLL_MS(5000) to absorb normal jitter
+    let lastGpsTs = null;
+    let lastGpsChangeAt = Date.now();
+    let wasGpsStopped = false; // tracks the previous tick's stopped state, to detect the resume EDGE
+    async function isGpsStopped() {
         try {
-            const res = await fetch('/api/latest/odometer');
+            const res = await fetch('/api/latest/gps');
             if (!res.ok) return false; // can't tell — don't block the live card on a transient error
             const data = await res.json();
-            if (!data || !data.timestamp) return false; // no odometer data ever logged — not our call to make
-            if (data.timestamp !== lastOdometerTs) {
-                lastOdometerTs = data.timestamp;
-                lastOdometerChangeAt = Date.now();
+            if (!data || !data.timestamp) return false; // no GPS data ever logged — not our call to make
+            if (data.timestamp !== lastGpsTs) {
+                lastGpsTs = data.timestamp;
+                lastGpsChangeAt = Date.now();
                 return false;
             }
-            return (Date.now() - lastOdometerChangeAt) > ODOMETER_STALE_MS;
+            return (Date.now() - lastGpsChangeAt) > GPS_STALE_MS;
         } catch (err) {
             return false;
         }
@@ -1160,11 +1085,7 @@
         // on a date comparison — makes that failure mode impossible: worst
         // case, a stale poll just doesn't add anything new this tick.
         const todayStartForFetch = getTodayStart();
-        const [todayRaw, todayOdo] = await Promise.all([
-            fetchRawData(todayStartForFetch),
-            fetchOdometerData(todayStartForFetch),
-        ]);
-        applyOdometerDistance(todayRaw, todayOdo);
+        const todayRaw = await fetchRawData(todayStartForFetch);
         await fetchFullHistoryIfStale();
 
         const cachedLatestTs = cachedFullDocs.length ? cachedFullDocs[cachedFullDocs.length - 1].timestamp : null;
@@ -1199,11 +1120,11 @@
         // todayDocs is filtered below) so a fresh run's sessionStartTs cutoff
         // is already in effect this same tick — otherwise the newly-resumed
         // run would render one more tick using the OLD accumulated session.
-        const odometerStoppedNow = hwLive ? await isOdometerStopped() : false;
-        if (wasOdometerStopped && !odometerStoppedNow && hwLive) {
-            resetRunState('odometer resumed after stop — starting new run');
+        const gpsStoppedNow = hwLive ? await isGpsStopped() : false;
+        if (wasGpsStopped && !gpsStoppedNow && hwLive) {
+            resetRunState('GPS resumed after stop — starting new run');
         }
-        wasOdometerStopped = odometerStoppedNow;
+        wasGpsStopped = gpsStoppedNow;
 
         const useRouteTape = !!(routeTapeData && routeTapeKmNums.length);
         if (!useRouteTape) {
@@ -1255,15 +1176,15 @@
             }
 
             if (hwLive) {
-                if (odometerStoppedNow) {
+                if (gpsStoppedNow) {
                     // Train stationary — freeze exactly here. Don't touch
                     // lastCard/kmIdx/toolbarCount (they stay at whatever they
                     // were on the last real moving reading), and don't build
                     // a new/growing card, so the pts counter stops climbing
                     // and Blocks/Peak Distribution/Worst Peaks stop updating
-                    // until the odometer reports movement again.
+                    // until GPS reports movement again.
                     setStatus(hwLive);
-                    renderOdometerStopped(lastCard ? { ...lastCard, completed: true } : null);
+                    renderGpsStopped(lastCard ? { ...lastCard, completed: true } : null);
                 } else if (resolved.loc) {
                     const { km, kmIdx, kmStart, kmEnd } = resolved.loc;
                     // Archive every KM before this one that just finished —

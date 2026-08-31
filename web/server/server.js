@@ -568,9 +568,13 @@ async function initDB() {
                 x_axis REAL, y_axis REAL, z_axis REAL,
                 g_force REAL, rms_v REAL, rms_l REAL,
                 sd_v REAL, sd_l REAL, p2p_v REAL, p2p_l REAL,
-                peak REAL, fs REAL, window_ms REAL, distance_m REAL
+                peak REAL, fs REAL, window_ms REAL, distance_m REAL,
+                dist_km REAL, dist_m REAL, dist_mm REAL
             );
             ALTER TABLE monitoring_data ADD COLUMN IF NOT EXISTS distance_m REAL;
+            ALTER TABLE monitoring_data ADD COLUMN IF NOT EXISTS dist_km REAL;
+            ALTER TABLE monitoring_data ADD COLUMN IF NOT EXISTS dist_m REAL;
+            ALTER TABLE monitoring_data ADD COLUMN IF NOT EXISTS dist_mm REAL;
             CREATE TABLE IF NOT EXISTS realtime_data (
                 id        SERIAL PRIMARY KEY,
                 timestamp TIMESTAMPTZ NOT NULL,
@@ -584,14 +588,6 @@ async function initDB() {
                 timestamp        TIMESTAMPTZ NOT NULL,
                 lat REAL, lng REAL, speed_kmh REAL, total_distance_m REAL
             );
-            CREATE TABLE IF NOT EXISTS odometer_data (
-                id            SERIAL PRIMARY KEY,
-                timestamp     TIMESTAMPTZ NOT NULL,
-                enc_count     BIGINT,
-                enc_km        INTEGER, enc_m INTEGER, enc_mm INTEGER,
-                speed_ms      REAL, speed_kmh REAL,
-                raw_line      TEXT
-            );
         `);
         await pool.query(`
             CREATE INDEX IF NOT EXISTS idx_ae_timestamp   ON accelerometer_events(timestamp DESC);
@@ -602,7 +598,6 @@ async function initDB() {
             CREATE INDEX IF NOT EXISTS idx_rd_timestamp   ON realtime_data(timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_rd_sensor_ts   ON realtime_data(sensor, timestamp DESC);
             CREATE INDEX IF NOT EXISTS idx_gps_timestamp  ON rm_gps(timestamp DESC);
-            CREATE INDEX IF NOT EXISTS idx_odo_timestamp  ON odometer_data(timestamp DESC);
         `);
         pgReady = true;
         console.log('PostgreSQL connected and schema ready');
@@ -877,6 +872,57 @@ let lastHealthStatus = null;
 let totalDistanceM = 0;
 let lastGpsCoord   = null;
 let lastGpsFixAt   = 0;
+
+// ── GPS speed×time distance accumulation ───────────────────────────────
+// totalDistanceM is driven by GPS fixes: on every fix we integrate speed
+// over the elapsed time since the PREVIOUS fix. Guarded against
+// session-boundary jumps — first fix after startup, or GPS reacquiring
+// after a long dropout — so a stale elapsed time can't add a huge bogus
+// distance in one step.
+const GPS_DISTANCE_MAX_GAP_S = 10;
+// Below this speed, GPS noise/jitter (multipath, weak signal, satellite
+// drift) reports a small non-zero speed even while completely stationary.
+// Treat anything under this as "not moving" so it doesn't get integrated
+// into totalDistanceM — the vehicle must show a real, sustained speed
+// before distance starts accumulating.
+const GPS_MIN_MOVING_SPEED_KMH = 1;
+// Basic distance formula (distance = speed × time) already integrates into
+// totalDistanceM via accumulateGpsDistance(). These helpers just re-express
+// that same total distance in km / m / mm for storage in monitoring_data.
+function distanceUnitsFromMeters(distanceM) {
+    const m = distanceM || 0;
+    return {
+        distKm: m / 1000,
+        distM:  m,
+        distMm: m * 1000,
+    };
+}
+
+function accumulateGpsDistance(speedKmh) {
+    const now = Date.now();
+    const speed = speedKmh || 0;
+    if (lastGpsFixAt) {
+        const dtSec = (now - lastGpsFixAt) / 1000;
+        // Only integrate distance when the GPS-reported speed indicates
+        // genuine motion. This filters out stationary jitter (e.g. 0.05–
+        // 0.5 km/h noise) that would otherwise make distance creep up
+        // while the system isn't actually moving.
+        if (dtSec > 0 && dtSec <= GPS_DISTANCE_MAX_GAP_S && speed >= GPS_MIN_MOVING_SPEED_KMH) {
+            const speedMs = speed / 3.6;
+            totalDistanceM += speedMs * dtSec;
+        }
+    }
+}
+
+// async function restoreTotalDistance() {
+//     try {
+//         const r = await pool.query('SELECT total_distance_m FROM rm_gps ORDER BY timestamp DESC LIMIT 1');
+//         if (r.rows.length && r.rows[0].total_distance_m != null) {
+//             totalDistanceM = r.rows[0].total_distance_m;
+//             console.log(`[GPS] Restored totalDistanceM from DB: ${totalDistanceM.toFixed(1)}m`);
+//         }
+//     } catch (e) { console.error('[GPS] totalDistanceM restore failed:', e.message); }
+// }
 
 async function computeStats(hours = 24) {
     const dbNow  = await getDBNow();
@@ -1424,91 +1470,6 @@ app.get('/api/monitoring/all', async (req, res) => {
     }
 });
 
-// ── Live Logs page — recent odometer readings backfill on page load, live
-// updates afterward come from the 'odometer-data' socket event above. ─────
-app.get('/api/logs/odometer', async (req, res) => {
-    const limit = Math.min(parseInt(req.query.limit) || 200, 2000);
-    try {
-        if (!pgReady) return res.json([]);
-        const r = await pool.query(
-            `SELECT timestamp, enc_count, enc_km, enc_m, enc_mm, speed_ms, speed_kmh, raw_line
-             FROM odometer_data ORDER BY timestamp DESC LIMIT $1`,
-            [limit]
-        );
-        res.json(r.rows.reverse().map(row => ({
-            timestamp: row.timestamp, ok: true,
-            count: row.enc_count, km: row.enc_km, meter: row.enc_m, mm: row.enc_mm,
-            speedMs: row.speed_ms, speedKmh: row.speed_kmh,
-        })));
-    } catch (e) {
-        console.error('/api/logs/odometer error:', e.message);
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// ── Full odometer history — used by acceleration-km.js to derive each
-// monitoring_data record's real distance_m from the odometer's own
-// timestamped readings (nearest-preceding match) instead of trusting
-// whatever distance_m happened to be stamped onto the accelerometer row at
-// insert time. No LIMIT cap (unlike /api/logs/odometer, which is UI-log
-// oriented and capped at 2000) — the KM report needs the full series to
-// correlate against the full monitoring_data history. ─────────────────────
-app.get('/api/odometer/all', async (req, res) => {
-    try {
-        if (!pgReady) return res.json([]);
-        // Same optional ?date= scoping as /api/monitoring/all — omitted,
-        // behaves exactly as before (full table).
-        const { date } = req.query;
-        const params = [];
-        let where = '';
-        if (date) {
-            params.push(new Date(`${date}T00:00:00+05:30`).toISOString());
-            params.push(new Date(`${date}T23:59:59+05:30`).toISOString());
-            where = `WHERE timestamp >= $${params.length - 1} AND timestamp <= $${params.length}`;
-        }
-        const r = await pool.query(
-            `SELECT timestamp, enc_km, enc_m, enc_mm, speed_ms, speed_kmh
-             FROM odometer_data ${where} ORDER BY timestamp DESC LIMIT 1000000`,
-            params
-        );
-        r.rows.reverse(); // same DESC+LIMIT-then-reverse fix as /api/monitoring/all above
-        res.json(r.rows.map(row => ({
-            timestamp: row.timestamp,
-            distance_m: row.enc_km * 1000 + row.enc_m + row.enc_mm / 1000,
-            speedMs: row.speed_ms, speedKmh: row.speed_kmh,
-        })));
-    } catch (e) {
-        console.error('/api/odometer/all error:', e.message);
-        res.status(500).json({ error: e.message });
-    }
-});
-
-// Latest single odometer reading — used by dashboards that show live
-// distance/speed and want it driven directly by the encoder's own cadence
-// rather than whatever totalDistanceM happened to be at the last GPS fix
-// (GPS fixes arrive far less often than encoder readings, so distance
-// displays reading off rm_gps lagged/looked frozen between fixes).
-app.get('/api/latest/odometer', async (req, res) => {
-    try {
-        if (!pgReady) return res.json(null);
-        const r = await pool.query(
-            `SELECT timestamp, enc_count, enc_km, enc_m, enc_mm, speed_ms, speed_kmh
-             FROM odometer_data ORDER BY timestamp DESC LIMIT 1`
-        );
-        if (!r.rows.length) return res.json(null);
-        const row = r.rows[0];
-        res.json({
-            timestamp: row.timestamp,
-            km: row.enc_km, meter: row.enc_m, mm: row.enc_mm,
-            totalDistanceM: row.enc_km * 1000 + row.enc_m + row.enc_mm / 1000,
-            speedMs: row.speed_ms, speedKmh: row.speed_kmh,
-        });
-    } catch (e) {
-        console.error('/api/latest/odometer error:', e.message);
-        res.status(500).json({ error: e.message });
-    }
-});
-
 function rciSensorFilter(s) {
     return ['left', 'right', 'pivot'].includes(s) ? s : null;
 }
@@ -1909,12 +1870,9 @@ async function handleBinarySensorPacket(sensorMeta, message, timestamp) {
     lastHealthStatus = inferredHealth;
     io.emit('system-health', inferredHealth);
 
-    // Distance now comes from the odometer encoder (see handleOdometerSocket),
-    // not from GPS Haversine-diffing between fixes — the encoder is a direct
-    // wheel-rotation measurement and doesn't suffer GPS jitter/noise at low
-    // speed. GPS here only updates position (lat/lng) and speed.
     if (sensorId === 'left' && lat && lng) {
         const speedKmh = +(speedMs * 0.036).toFixed(2);
+        accumulateGpsDistance(speedKmh);
         lastGpsCoord = { lat, lng, speedKmh };
         lastGpsFixAt = Date.now();
         io.emit('gps-data', { lat, lng, speedKmh, totalDistanceM, timestamp });
@@ -1925,12 +1883,15 @@ async function handleBinarySensorPacket(sensorMeta, message, timestamp) {
     }
 
     if (pgReady) {
-        pool.query(
-            `INSERT INTO monitoring_data
-             (timestamp, type, device_id, x_axis, y_axis, z_axis, g_force, rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l, peak, distance_m)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
-            [timestamp, 'accelerometer', sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, totalDistanceM]
-        ).catch(e => console.error('monitoring_data insert:', e.message));
+        {
+            const { distKm, distM, distMm } = distanceUnitsFromMeters(totalDistanceM);
+            pool.query(
+                `INSERT INTO monitoring_data
+                 (timestamp, type, device_id, x_axis, y_axis, z_axis, g_force, rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l, peak, distance_m, dist_km, dist_m, dist_mm)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+                [timestamp, 'accelerometer', sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, totalDistanceM, distKm, distM, distMm]
+            ).catch(e => console.error('monitoring_data insert:', e.message));
+        }
 
         pool.query(
             `INSERT INTO realtime_data
@@ -2027,8 +1988,7 @@ mqttClient.on('message', async (topic, message) => {
                 const speedCms = spdM ? parseFloat(spdM[1]) : 0;
                 const speedKmh = +(speedCms * 0.036).toFixed(2);
 
-                // Distance comes from the odometer encoder now — see
-                // handleOdometerSocket. GPS only updates position/speed here.
+                accumulateGpsDistance(speedKmh);
                 lastGpsCoord = { lat, lng, speedKmh };
                 lastGpsFixAt = Date.now();
                 io.emit('gps-data', { lat, lng, speedKmh, totalDistanceM, timestamp });
@@ -2080,11 +2040,12 @@ mqttClient.on('message', async (topic, message) => {
         console.log(`Parsed [${sensorSide}]: x=${x} y=${y} z=${z} peak=${peak} gForce=${gForce.toFixed(4)}`);
 
         if (pgReady) {
+            const { distKm, distM, distMm } = distanceUnitsFromMeters(totalDistanceM);
             pool.query(
                 `INSERT INTO monitoring_data
-                 (timestamp, type, device_id, x_axis, y_axis, z_axis, g_force, rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l, peak, fs, window_ms, distance_m)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
-                [timestamp, 'accelerometer', sensorSide, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, fs, win, totalDistanceM]
+                 (timestamp, type, device_id, x_axis, y_axis, z_axis, g_force, rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l, peak, fs, window_ms, distance_m, dist_km, dist_m, dist_mm)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+                [timestamp, 'accelerometer', sensorSide, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, fs, win, totalDistanceM, distKm, distM, distMm]
             ).catch(e => console.error('monitoring_data insert:', e.message));
 
             pool.query(
@@ -2179,9 +2140,8 @@ function crc16Ccitt(buf) {
 }
 
 function processGpsFix(lat, lng, speedKmh) {
-    // totalDistanceM comes from the odometer encoder now — see
-    // handleOdometerSocket. This GPS path only updates position/speed.
     const timestamp = getTimezoneTimestamp();
+    accumulateGpsDistance(speedKmh);
     lastGpsCoord = { lat, lng, speedKmh };
     lastGpsFixAt = Date.now();
     io.emit('gps-data', { lat, lng, speedKmh, totalDistanceM, timestamp });
@@ -2291,11 +2251,12 @@ async function processRawAccelReading(sensorMeta, stats, timestamp) {
     io.emit('system-health', inferredHealth);
 
     if (pgReady) {
+        const { distKm, distM, distMm } = distanceUnitsFromMeters(totalDistanceM);
         pool.query(
             `INSERT INTO monitoring_data
-             (timestamp, type, device_id, x_axis, y_axis, z_axis, g_force, rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l, peak, fs, window_ms, distance_m)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
-            [timestamp, 'accelerometer', sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, fs, windowMs, totalDistanceM]
+             (timestamp, type, device_id, x_axis, y_axis, z_axis, g_force, rms_v, rms_l, sd_v, sd_l, p2p_v, p2p_l, peak, fs, window_ms, distance_m, dist_km, dist_m, dist_mm)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)`,
+            [timestamp, 'accelerometer', sensorId, x, y, z, gForce, rmsV, rmsL, sdV, sdL, p2pV, p2pL, peak, fs, windowMs, totalDistanceM, distKm, distM, distMm]
         ).catch(e => console.error('monitoring_data insert:', e.message));
 
         pool.query(
@@ -2399,115 +2360,6 @@ function handleAccelSocket(socket, firstChunk) {
     socket.on('error', e  => console.log(`[ACCEL-TCP] ${sensorId} error: ${e.message}`));
 }
 
-// ── Odometer — plain ASCII CSV lines over TCP, not binary sync-byte framed
-// like GPS/accel. A line looks like:
-//   ENCODER,COUNT=5524,KM=0,METER=342,MM=247,SPEED_MS=0.079,SPEED_KMH=0.29
-// Routed on the mux below by checking for the literal "ENCODER," prefix,
-// since its first byte ('E' = 0x45) never collides with SYNC0/ACCEL_SYNC0.
-const ODOMETER_BOARD_IP = process.env.ODOMETER_BOARD_IP || '192.168.1.211';
-
-function parseOdometerLine(line) {
-    if (!line.startsWith('ENCODER,')) return null;
-    const fields = {};
-    for (const part of line.trim().split(',')) {
-        const eq = part.indexOf('=');
-        if (eq === -1) continue;
-        fields[part.slice(0, eq).trim()] = part.slice(eq + 1).trim();
-    }
-    const count     = parseInt(fields.COUNT, 10);
-    const km        = parseInt(fields.KM, 10);
-    const meter     = parseInt(fields.METER, 10);
-    const mm        = parseInt(fields.MM, 10);
-    const speedMs   = parseFloat(fields.SPEED_MS);
-    const speedKmh  = parseFloat(fields.SPEED_KMH);
-    if ([count, km, meter, mm, speedMs, speedKmh].some(v => isNaN(v))) return null;
-    return { count, km, meter, mm, speedMs, speedKmh };
-}
-
-function handleOdometerSocket(socket, firstChunk) {
-    console.log(`[ODOMETER-TCP] board connected (${socket.remoteAddress})`);
-    let buf = firstChunk.toString('ascii');
-
-    function drain() {
-        let idx;
-        while ((idx = buf.indexOf('\n')) !== -1) {
-            const line = buf.slice(0, idx).trim();
-            buf = buf.slice(idx + 1);
-            if (!line) continue;
-
-            const timestamp = getTimezoneTimestamp();
-            const parsed = parseOdometerLine(line);
-            if (!parsed) {
-                console.log(`[ODOMETER-TCP] *** UNPARSEABLE LINE *** raw=${line}`);
-                io.emit('odometer-data', { timestamp, raw: line, ok: false });
-                continue;
-            }
-
-            // Reject an all-zero packet as a board reset/glitch, not a real
-            // reading. COUNT/KM/METER/MM are cumulative encoder counts —
-            // they never legitimately drop back to 0 mid-run (only SPEED
-            // does that, when genuinely stationary). COUNT===0 in
-            // particular only happens right after the board reboots.
-            // Saving these to odometer_data was corrupting the whole run's
-            // distance series: every /api/odometer/all-based lookup picks
-            // the nearest-preceding reading by timestamp, so one stray
-            // all-zero row made distance (and therefore the KM report)
-            // look like it reset to 0 for every record between that glitch
-            // and the next real reading. Skipped entirely — not persisted,
-            // not applied to totalDistanceM, not broadcast as a real
-            // reading — so a genuine reconnect just waits for the next
-            // real packet instead of momentarily reporting 0.
-            const isAllZeroGlitch = parsed.count === 0 && parsed.km === 0 && parsed.meter === 0
-                && parsed.mm === 0 && parsed.speedMs === 0 && parsed.speedKmh === 0;
-            if (isAllZeroGlitch) {
-                console.log('[ODOMETER-TCP] *** ALL-ZERO PACKET IGNORED (board reset glitch, not a real reading) ***');
-                continue;
-            }
-
-            // Train stopped (speed genuinely 0, but COUNT/KM/METER/MM still
-            // hold real cumulative values — this is NOT the reset glitch
-            // above). Per requirement: while stopped, don't log to console,
-            // don't broadcast as a "live" update, and don't persist to
-            // odometer_data — the run simply freezes at the last real
-            // moving reading already saved/shown. Skipped up here, before
-            // the console.log/io.emit/db insert below, so none of those
-            // three things happen for a stopped packet.
-            const isStopped = parsed.speedMs === 0 && parsed.speedKmh === 0;
-            if (isStopped) {
-                continue;
-            }
-
-            console.log(`[ODOMETER-TCP] Count:${parsed.count} Dist:${parsed.km}KM ${parsed.meter}M ${parsed.mm}MM Speed:${parsed.speedMs.toFixed(3)}m/s ${parsed.speedKmh.toFixed(2)}km/h`);
-
-            // totalDistanceM is now sourced from the encoder directly (a real
-            // wheel-rotation measurement) instead of GPS Haversine-diffing
-            // between fixes, which was noisy/stuck-at-0 at low speed. This is
-            // the same global totalDistanceM already wired into every report,
-            // km-wise split, and accelerometer/impact row across the app —
-            // updating it here changes the distance source everywhere at once.
-            totalDistanceM = parsed.km * 1000 + parsed.meter + parsed.mm / 1000;
-
-            io.emit('odometer-data', {
-                timestamp, ok: true,
-                count: parsed.count, km: parsed.km, meter: parsed.meter, mm: parsed.mm,
-                speedMs: parsed.speedMs, speedKmh: parsed.speedKmh, totalDistanceM,
-            });
-            if (pgReady) {
-                pool.query(
-                    `INSERT INTO odometer_data (timestamp, enc_count, enc_km, enc_m, enc_mm, speed_ms, speed_kmh, raw_line)
-                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-                    [timestamp, parsed.count, parsed.km, parsed.meter, parsed.mm, parsed.speedMs, parsed.speedKmh, line]
-                ).catch(e => console.error('[ODOMETER-TCP] db insert:', e.message));
-            }
-        }
-    }
-
-    drain();
-    socket.on('data', chunk => { buf += chunk.toString('ascii'); drain(); });
-    socket.on('close', () => console.log('[ODOMETER-TCP] board disconnected'));
-    socket.on('error', e  => console.log(`[ODOMETER-TCP] error: ${e.message}`));
-}
-
 const tcpMux = net.createServer(rawSocket => {
     let routed = false;
     const timeout = setTimeout(() => {
@@ -2524,8 +2376,6 @@ const tcpMux = net.createServer(rawSocket => {
             handleGpsSocket(rawSocket, firstChunk);
         } else if (firstChunk[0] === ACCEL_SYNC0) {
             handleAccelSocket(rawSocket, firstChunk);
-        } else if (firstChunk.toString('ascii', 0, 8) === 'ENCODER,') {
-            handleOdometerSocket(rawSocket, firstChunk);
         } else {
             server.emit('connection', rawSocket);
             rawSocket.unshift(firstChunk);

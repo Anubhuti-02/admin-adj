@@ -44,8 +44,12 @@ async function preloadSensorReadings() {
             if (side === 'pivot') {
                 const vert = Math.abs(d.y ?? 0);
                 const lat  = Math.abs(d.x ?? 0);
-                _set('abpVert', vert.toFixed(4) + ' g');
-                _set('abpLat',  lat.toFixed(4)  + ' g');
+                // Pivot's DOM ids in index.html are pivotY (P-VERT) and
+                // pivotX (P-LAT) — matches the live socket path in index.js's
+                // updateNorthernPanel(), unlike left/right which use
+                // ablVert/ablLat/abrVert/abrLat.
+                _set('pivotY', vert.toFixed(4) + ' g');
+                _set('pivotX', lat.toFixed(4)  + ' g');
             }
 
             // Operator dashboard raw values
@@ -187,7 +191,42 @@ window.preloadGraphHistory = async function(distChart, subplotsObj) {
     }
 };
 
-// ── 5. Pre-populate health grid ───────────────────────────────────────────
+// ── 5. Pre-populate last-saved GPS position (left panel) ───────────────────
+async function preloadGPS() {
+    try {
+        const res = await fetch(`${PRELOAD_SERVER}/api/latest/gps`);
+        const gps = await res.json();
+        if (!gps) return;
+
+        _set('gpsLat', gps.lat != null ? (+gps.lat).toFixed(6) + '°' : null);
+        _set('gpsLon', gps.lng != null ? (+gps.lng).toFixed(6) + '°' : null);
+
+        console.log('[preload] Last saved GPS position populated from DB');
+    } catch (e) {
+        console.warn('[preload] GPS fetch failed:', e.message);
+    }
+}
+
+// ── 5b. Pre-populate last-saved odometer distance (left panel) ─────────────
+// Uses the odometer's own km/meter/mm fields (odometer_data table) directly,
+// not monitoring_data's derived distance_m — same source the live
+// 'odometer-data' socket handler in index.js uses, so the on-load value and
+// the first live update never disagree.
+async function preloadOdometerDistance() {
+    try {
+        const res = await fetch(`${PRELOAD_SERVER}/api/latest/odometer`);
+        const odo = await res.json();
+        if (!odo || odo.km == null) return;
+
+        _set('leftDistance', `${odo.km} km ${odo.meter} m ${odo.mm} mm`);
+
+        console.log('[preload] Last saved odometer distance populated from DB');
+    } catch (e) {
+        console.warn('[preload] Odometer distance fetch failed:', e.message);
+    }
+}
+
+// ── 6. Pre-populate health grid ───────────────────────────────────────────
 window.preloadHealth = async function() {
     try {
         const res    = await fetch(`${PRELOAD_SERVER}/api/latest/health`);
@@ -209,6 +248,8 @@ document.addEventListener('DOMContentLoaded', () => {
     preloadSensorReadings();
     preloadStats();
     preloadAlerts();
+    preloadGPS();
+    preloadOdometerDistance();
     // preloadHealth and preloadGraphHistory are called by their respective
     // page JS files after charts/health grid are initialized
 });

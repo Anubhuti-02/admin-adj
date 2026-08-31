@@ -174,7 +174,7 @@
             const kmDocsSlice = docsForDay.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
             cursor = kmEnd;
 
-            if (kmDocsSlice.length) cards.push(buildRouteTapeCard(kmDocsSlice, km, kmStart, false));
+            if (kmDocsSlice.length) cards.push(buildRouteTapeCard(kmDocsSlice, km, kmStart, false, docsForDay));
         }
         return cards;
     }
@@ -184,6 +184,75 @@
     let todayDocs = [];
     let lastFetchTime = 0;
     let limitsConfig = null;   // loaded from /api/limits-config
+
+    // ── Completed-KM history stack ──────────────────────────────────────────────
+    // As each KM finishes, its final Blocks/Peak-Distribution/Worst-Peaks card
+    // gets frozen and stacked below the current live card (newest completed on
+    // top of the stack, i.e. directly under the live card) instead of being
+    // discarded when the next KM's live card overwrites it. Reset whenever a
+    // new day's run starts.
+    let completedKmCards = [];       // newest-first
+    let lastArchivedKmIdx = -1;      // highest kmIdx already pushed into completedKmCards
+    let archivedForDate = null;      // which day's todayStart the above belongs to
+    let runComplete = false;         // true once distance has passed the route tape's end
+    // Wall-clock moment (Date.now()) the CURRENT run started, or null if no
+    // reset has happened yet (default: use the whole day's data, exactly the
+    // legacy behavior). Set by resetRunState() — new route tape upload, or
+    // the odometer going from stopped back to moving. Docs timestamped
+    // before this are excluded from todayDocs below, so a fresh run can't
+    // immediately re-absorb an earlier-today run's records just because
+    // they happen to share the same calendar day and a low distance_m.
+    let sessionStartTs = null;
+
+    function resetKmHistoryIfNewDay(todayStart) {
+        if (archivedForDate !== todayStart) {
+            completedKmCards = [];
+            lastArchivedKmIdx = -1;
+            runComplete = false;
+            archivedForDate = todayStart;
+        }
+    }
+
+    // Archives every KM strictly before `uptoKmIdxExclusive` that hasn't been
+    // archived yet, built from `docsSource` (the full run's data — today's
+    // whole contiguous session, not just the current in-progress KM's slice —
+    // so a completed KM's numbers don't change again after it's archived).
+    function archiveCompletedKms(uptoKmIdxExclusive, docsSource) {
+        for (let idx = lastArchivedKmIdx + 1; idx < uptoKmIdxExclusive; idx++) {
+            const km = routeTapeKmNums[idx];
+            if (km == null) break;
+            const kmStart = cumulativeDistanceStart(idx);
+            const kmEnd = kmStart + routeTapeData.kmLengths[km];
+            const kmDocs = docsSource.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
+            if (!kmDocs.length) continue; // nothing recorded for this KM — skip rather than archive a blank card
+            const card = buildRouteTapeCard(kmDocs, km, kmStart, false, docsSource);
+            card.historical = false;
+            card.completed = true;
+            completedKmCards.unshift(card);
+            lastArchivedKmIdx = idx;
+        }
+    }
+
+    // Shared full reset of everything tied to "the current run" — called
+    // both when a new route tape is uploaded (old tape's KM numbering is
+    // meaningless against the new one) and when the odometer goes from
+    // stopped back to moving (per requirement: each stop/start cycle is
+    // treated as an independent fresh run, not a continuation). Wipes
+    // archived KM history, the in-progress card, odometer-staleness
+    // tracking, the toolbar count, and — via sessionStartTs — excludes
+    // every doc logged before this moment from the next live session.
+    function resetRunState(reason) {
+        console.log(`[km] Resetting run state (${reason})`);
+        completedKmCards      = [];
+        lastArchivedKmIdx     = -1;
+        archivedForDate       = null;
+        runComplete           = false;
+        lastCard              = null;
+        lastOdometerTs        = null;
+        lastOdometerChangeAt  = Date.now();
+        sessionStartTs        = Date.now();
+        setToolbarCount(0);
+    }
 
     // ── Peak-distribution thresholds — same source as the Configuration page
     // (axle: /api/thresholds, pivot: /api/thresholds/pivot). These are the
@@ -265,6 +334,16 @@
             console.warn('[km] Could not load route tape data:', e.message);
             routeTapeData = null; routeTapeKmNums = [];
         }
+    }
+
+    if (typeof io !== 'undefined') {
+        const _kmRouteTapeSocket = io(window.location.origin);
+        _kmRouteTapeSocket.on('route-tape-updated', async (newChainagePreview) => {
+            console.log('[km] Route tape updated', newChainagePreview?.sourceFileName || '(cleared)');
+            resetRunState('new route tape uploaded');
+            await loadRouteTapeData();
+            await updateReport(); // don't wait for the next 5s poll tick
+        });
     }
 
     // Tab / Section toggle
@@ -618,22 +697,22 @@
         </div>`;
     }
 
-    function renderCard(data) {
-        const container = document.getElementById('km-container');
-        if (!container) return;
+    function cardHtml(data) {
         const bD = activeSections.blocks     ? 'block' : 'none';
         const pD = activeSections.peakDist   ? 'block' : 'none';
         const wD = activeSections.worstPeaks ? 'block' : 'none';
         const updatedStr = data.lastTimestamp ? new Date(data.lastTimestamp).toLocaleTimeString() : 'Just now';
 
         let badge = '';
-        if (data.historical) {
+        if (data.completed) {
+            badge = `<span class="historical-badge"><i class="fas fa-check-circle"></i> Completed</span>`;
+        } else if (data.historical) {
             badge = `<span class="historical-badge"><i class="fas fa-history"></i> Last Session</span>`;
         } else if (data.isPartial && isLive) {
             badge = `<span class="live-badge"><i class="fas fa-circle blink"></i> LIVE &nbsp;<span style="font-size:11px">${data.recordsSoFar} pts</span></span>`;
         }
 
-        container.innerHTML = `
+        return `
         <div class="km-block${data.isPartial && isLive ? ' km-live' : ''}">
             <div class="km-header">
                 <div class="km-header-left">
@@ -658,6 +737,53 @@
                 ${renderWorstPeaksTable(data.worstPeaks, data)}
             </div>
         </div>`;
+    }
+
+    // Renders the current/live card (if any) followed by the stacked
+    // completed-KM history below it, newest-completed on top of that stack —
+    // so as each KM finishes, its card gets "put down" and the new KM's card
+    // takes over the top slot, same idea as a live feed.
+    function renderCard(data) {
+        const container = document.getElementById('km-container');
+        if (!container) return;
+        const liveHtml = data ? cardHtml(data) : '';
+        const historyHtml = completedKmCards.map(cardHtml).join('');
+        container.innerHTML = liveHtml + historyHtml;
+    }
+
+    // Rendered when the odometer has gone stationary (speed stuck at 0) while
+    // still mid-KM — distinct from renderRunComplete() (distance ran past the
+    // end of the route tape). Here the run itself has just stopped moving:
+    // freeze the pts counter and swap the growing LIVE card for a plain
+    // completion-style banner, same completed-KM stack underneath.
+    function renderOdometerStopped(frozenCard) {
+        const container = document.getElementById('km-container');
+        if (!container) return;
+        const banner = `
+        <div class="km-block" style="text-align:center;padding:20px;color:#16a34a">
+            <i class="fas fa-flag-checkered"></i>
+            <strong> Run complete</strong> — odometer reports 0 km/h, train has stopped.
+        </div>`;
+        // Show whatever was last actually computed (the same values already
+        // saved to the CSV) instead of leaving this blank — frozenCard is
+        // the in-progress current-KM card as it stood the moment the
+        // odometer went stale, not yet moved into completedKmCards.
+        const frozenHtml = frozenCard ? cardHtml(frozenCard) : '';
+        container.innerHTML = banner + frozenHtml + completedKmCards.map(cardHtml).join('');
+    }
+
+    // Rendered once the run has gone past the end of the uploaded route
+    // tape — no more "current" KM to grow, so instead of a live card this
+    // shows a plain completion banner above the same completed-KM stack.
+    function renderRunComplete() {
+        const container = document.getElementById('km-container');
+        if (!container) return;
+        const banner = `
+        <div class="km-block" style="text-align:center;padding:20px;color:#16a34a">
+            <i class="fas fa-flag-checkered"></i>
+            <strong> Run complete</strong> — distance has passed the end of the uploaded route tape (${routeTapeData.sourceFileName}).
+        </div>`;
+        container.innerHTML = banner + completedKmCards.map(cardHtml).join('');
     }
 
     // ─── Status helpers ─────────────────────────────────────────────────────────
@@ -702,9 +828,10 @@
         return timestamp.startsWith(dateStr);
     }
 
-    async function fetchRawData() {
+    async function fetchRawData(dateStr) {
         try {
-            const res = await fetch('/api/monitoring/all');
+            const url = dateStr ? `/api/monitoring/all?date=${encodeURIComponent(dateStr)}` : '/api/monitoring/all';
+            const res = await fetch(url);
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
             const data = await res.json();
             data.sort((a,b) => a.timestamp.localeCompare(b.timestamp));
@@ -715,11 +842,167 @@
         }
     }
 
+    // ── Full-history caching ────────────────────────────────────────────────────
+    // updateReport() runs every POLL_MS (5s). It only ever needs TODAY's rows
+    // for the live card, so those are fetched fresh (server-side ?date=
+    // filtered, cheap) on every tick. Full unfiltered history is only needed
+    // for the rare fallback paths (no data logged yet today, or the
+    // historical-anchor last-resort) — those don't need to be second-fresh,
+    // so the full fetch is cached and only redone every FULL_REFRESH_MS
+    // instead of every poll. This is what was making the page feel like it
+    // was hanging: every 5s tick was re-downloading and re-parsing the
+    // ENTIRE monitoring_data + odometer_data history in the browser, and
+    // that cost only grows as the tables grow.
+    const FULL_REFRESH_MS = 5 * 60 * 1000; // 5 minutes
+    let cachedFullDocs = [];
+    let cachedFullOdometer = [];
+    let lastFullFetchAt = 0;
+
+    async function fetchFullHistoryIfStale() {
+        const now = Date.now();
+        if (now - lastFullFetchAt < FULL_REFRESH_MS && cachedFullDocs.length) return;
+        // Only stamp lastFullFetchAt on a fetch that actually succeeded —
+        // fetchRawData()/fetchOdometerData() swallow network/HTTP errors and
+        // return [] on failure (see their own try/catch), which is
+        // indistinguishable from "genuinely no rows" here. Stamping the
+        // timestamp unconditionally meant one failed/timed-out full fetch
+        // (the ORDER BY ... LIMIT 500000 query is the expensive one) would
+        // leave cachedFullDocs empty for a full FULL_REFRESH_MS with no
+        // retry — which, combined with an empty today-fetch on the same
+        // tick, is what produced "No records in database yet" while
+        // hardware was actually live and history genuinely existed.
+        let fetchedDocs, fetchedOdo;
+        try {
+            [fetchedDocs, fetchedOdo] = await Promise.all([
+                fetchRawDataOrThrow(),
+                fetchOdometerDataOrThrow(),
+            ]);
+        } catch (e) {
+            console.warn('[km] full-history refresh failed, will retry next poll:', e.message);
+            return; // lastFullFetchAt left untouched — retried next tick
+        }
+        lastFullFetchAt = now;
+        cachedFullDocs = fetchedDocs;
+        cachedFullOdometer = fetchedOdo;
+        applyOdometerDistance(cachedFullDocs, cachedFullOdometer);
+    }
+
+    // Throwing variants used only by fetchFullHistoryIfStale() above, so a
+    // failed fetch can be told apart from a genuinely empty result instead
+    // of both collapsing to [].
+    async function fetchRawDataOrThrow() {
+        const res = await fetch('/api/monitoring/all');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        data.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+        return data;
+    }
+    async function fetchOdometerDataOrThrow() {
+        const res = await fetch('/api/odometer/all');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        data.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+        return data;
+    }
+
+    // ── Odometer-sourced distance ───────────────────────────────────────────────
+    // Distance/speed now come from the wheel encoder (odometer_data), not GPS.
+    // monitoring_data.distance_m is still populated server-side from
+    // totalDistanceM at the moment each accelerometer row is inserted, but
+    // that's a snapshot taken at accelerometer-sample cadence — it can lag or
+    // sit stale between encoder updates. Instead we pull the FULL odometer_data
+    // series (/api/odometer/all) and, for every monitoring_data record,
+    // overwrite its distance_m with the odometer reading whose own timestamp
+    // is the closest one at-or-before that record's timestamp — i.e. "what did
+    // the encoder actually say at that moment" rather than whatever value got
+    // stamped in at insert time.
+    // odometer readings are fetched per-source (today fresh, older cached —
+    // see fetchFullHistoryIfStale()) and merged straight into each doc's
+    // distance_m via applyOdometerDistance(); no separate series is kept
+    // around after that.
+
+    async function fetchOdometerData(dateStr) {
+        try {
+            const url = dateStr ? `/api/odometer/all?date=${encodeURIComponent(dateStr)}` : '/api/odometer/all';
+            const res = await fetch(url);
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            data.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+            return data;
+        } catch (err) {
+            console.error('[km] fetch odometer error:', err);
+            return [];
+        }
+    }
+
+    // Binary search: index of the last odometer reading with
+    // timestamp <= targetTs, or -1 if every reading is after targetTs.
+    function findOdometerIdxAtOrBefore(series, targetTs) {
+        let lo = 0, hi = series.length - 1, ans = -1;
+        while (lo <= hi) {
+            const mid = (lo + hi) >> 1;
+            if (series[mid].timestamp <= targetTs) { ans = mid; lo = mid + 1; }
+            else hi = mid - 1;
+        }
+        return ans;
+    }
+
+    // Overwrites each doc's distance_m in place with the odometer's own
+    // reading at-or-nearest that doc's timestamp. If a doc's timestamp is
+    // earlier than every odometer reading we've ever logged (e.g. right at
+    // startup, before the first ENCODER line arrives), falls back to the
+    // FIRST odometer reading rather than leaving distance_m null — matches
+    // "hasn't moved yet" (0-ish distance) instead of dropping the record
+    // from every distance-based bucket. If odometer_data is empty entirely,
+    // docs are left untouched (their existing monitoring_data distance_m,
+    // if any, is kept as a last resort).
+    function applyOdometerDistance(docs, series) {
+        if (!series.length) return docs;
+        for (const d of docs) {
+            const idx = findOdometerIdxAtOrBefore(series, d.timestamp);
+            const reading = idx >= 0 ? series[idx] : series[0];
+            d.distance_m = reading.distance_m;
+            d.speed_kmh = reading.speedKmh;
+        }
+        return docs;
+    }
+
     async function fetchLiveStatus() {
         try {
             const res = await fetch('/api/realtime/status');
             const data = await res.json();
             return data.receiving_data === true;
+        } catch (err) {
+            return false;
+        }
+    }
+
+    // ── Odometer-stopped detection ──────────────────────────────────────────────
+    // server.js now skips DB insert + socket broadcast for any packet where
+    // speed is genuinely 0 (train stationary) — see handleOdometerSocket()'s
+    // isStopped guard. That means /api/latest/odometer's speedKmh field is
+    // NOT reliable for detecting "stopped": it just freezes at whatever the
+    // last real (moving) reading was and never itself reports 0. What DOES
+    // change is that its timestamp stops advancing — no new odometer rows
+    // are being written at all while stationary. So "stopped" is detected as
+    // "the latest odometer timestamp hasn't changed for ODOMETER_STALE_MS",
+    // not by reading speedKmh directly.
+    const ODOMETER_STALE_MS = 12000; // > 2x POLL_MS(5000) to absorb normal jitter
+    let lastOdometerTs = null;
+    let lastOdometerChangeAt = Date.now();
+    let wasOdometerStopped = false; // tracks the previous tick's stopped state, to detect the resume EDGE
+    async function isOdometerStopped() {
+        try {
+            const res = await fetch('/api/latest/odometer');
+            if (!res.ok) return false; // can't tell — don't block the live card on a transient error
+            const data = await res.json();
+            if (!data || !data.timestamp) return false; // no odometer data ever logged — not our call to make
+            if (data.timestamp !== lastOdometerTs) {
+                lastOdometerTs = data.timestamp;
+                lastOdometerChangeAt = Date.now();
+                return false;
+            }
+            return (Date.now() - lastOdometerChangeAt) > ODOMETER_STALE_MS;
         } catch (err) {
             return false;
         }
@@ -737,6 +1020,18 @@
     // is detected as any gap between consecutive records wider than
     // RUN_GAP_MINUTES — a disconnect/reconnect always produces one.
     const RUN_GAP_MINUTES = 5;
+    // A much more generous gap threshold used ONLY when reconstructing the
+    // last completed "device activation" for the historical fallback (see
+    // runDocsAroundAnchor below). RUN_GAP_MINUTES=5 is right for the LIVE
+    // "is this still the same running session right now" check, but it's
+    // the wrong unit for "what did the previous run look like": a normal
+    // station stop, brief signal loss, or short reconnect blip would
+    // fragment one real activation into disconnected slivers under a
+    // 5-minute threshold, which is exactly what was leaving the historical
+    // KM card's Blocks/Peaks empty even after scoping to the anchor's
+    // calendar day — a run can also span midnight, so calendar-day
+    // scoping was the wrong unit too, not just too strict.
+    const ACTIVATION_GAP_MINUTES = 60;
     function currentRunDocs(docs, gapMinutes = RUN_GAP_MINUTES) {
         if (docs.length <= 1) return docs;
         const gapMs = gapMinutes * 60000;
@@ -794,7 +1089,16 @@
         }
 
         const anchor  = allDocs[anchorIdx];
-        const runDocs = runDocsAroundAnchor(allDocs, anchorIdx);
+        // Was day-scoped (anchor.timestamp.slice(0,10)), which is the wrong
+        // unit: a real device activation can span across midnight, and a
+        // single calendar day can contain multiple unrelated runs (e.g. a
+        // short test earlier that day). What "the previous device
+        // activation" actually means is a contiguous run of records with no
+        // long gap between them — same concept as runDocsAroundAnchor
+        // already used, just with a threshold generous enough (60 min) that
+        // a normal stop or brief reconnect blip doesn't fragment one real
+        // run into disconnected slivers.
+        const runDocs = runDocsAroundAnchor(allDocs, anchorIdx, ACTIVATION_GAP_MINUTES);
         const loc     = routeTapeKmForDistance(anchor.distance_m);
 
         if (!loc) {
@@ -804,7 +1108,7 @@
             const lastKm  = routeTapeKmNums[lastIdx];
             const kmStart = cumulativeDistanceStart(lastIdx);
             const lastKmDocs = runDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart);
-            const card = buildRouteTapeCard(lastKmDocs, lastKm, kmStart, false);
+            const card = buildRouteTapeCard(lastKmDocs, lastKm, kmStart, false, runDocs);
             card.historical = true;
             card.routeTapeExhausted = true;
             setStatus(hwLive);
@@ -816,7 +1120,7 @@
 
         const { km, kmIdx, kmStart, kmEnd } = loc;
         const kmDocsSlice = runDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
-        const card = buildRouteTapeCard(kmDocsSlice, km, kmStart, false);
+        const card = buildRouteTapeCard(kmDocsSlice, km, kmStart, false, runDocs);
         card.historical = true;
         setStatus(hwLive);
         setToolbarCount(kmIdx);
@@ -835,21 +1139,71 @@
         // source of KM boundaries now. No route tape → no guessed fallback →
         // report shows a prompt instead of building anything.
         await loadRouteTapeData();
-        // 1. Fetch raw data
-        allDocs = await fetchRawData();
+        // 1. Fetch today's data fresh every tick (server-side date-filtered,
+        // so this stays cheap regardless of total table size), plus
+        // whatever older history is currently cached (only refetched every
+        // FULL_REFRESH_MS — see fetchFullHistoryIfStale()). allDocs is the
+        // union of both, kept in the shape every downstream function
+        // already expects (timestamp-sorted ascending, full-history
+        // fallback paths included).
+        //
+        // Merge strategy is APPEND-ONLY by design: we never filter anything
+        // OUT of cachedFullDocs based on calendar date. An earlier version
+        // did `cachedFullDocs.filter(d => !isSameDate(...)).concat(todayRaw)`
+        // — if todayRaw ever came back empty (a transient fetch hiccup, or a
+        // browser-local-date vs UTC-stored-timestamp boundary mismatch),
+        // that filter could strip out MOST or ALL of cachedFullDocs too
+        // (since a lot of cached history can itself be "today" by
+        // calendar date), collapsing allDocs to empty and showing "No
+        // records in database yet" even though the data genuinely existed.
+        // Only ever adding new records — never removing cached ones based
+        // on a date comparison — makes that failure mode impossible: worst
+        // case, a stale poll just doesn't add anything new this tick.
+        const todayStartForFetch = getTodayStart();
+        const [todayRaw, todayOdo] = await Promise.all([
+            fetchRawData(todayStartForFetch),
+            fetchOdometerData(todayStartForFetch),
+        ]);
+        applyOdometerDistance(todayRaw, todayOdo);
+        await fetchFullHistoryIfStale();
+
+        const cachedLatestTs = cachedFullDocs.length ? cachedFullDocs[cachedFullDocs.length - 1].timestamp : null;
+        const newFromToday = cachedLatestTs
+            ? todayRaw.filter(d => d.timestamp > cachedLatestTs)
+            : todayRaw;
+        allDocs = cachedFullDocs
+            .concat(newFromToday)
+            .sort((a, b) => a.timestamp.localeCompare(b.timestamp));
         if (!allDocs.length) {
+            // Don't force Offline here — hwLive may genuinely be true
+            // (hardware connected, just nothing in monitoring_data yet, or
+            // this poll's fetches came back empty transiently). Check the
+            // real status instead of hardcoding the badge to Offline, which
+            // was misleading whenever this banner showed while hardware was
+            // actually live.
+            const hwLiveNow = await fetchLiveStatus();
             document.getElementById('km-container').innerHTML = `
                 <div class="no-data-banner">
                     <i class="fas fa-satellite-dish"></i>
                     <p>No records in database yet.</p>
                     <p style="color:#94a3b8;font-size:12px">Connect hardware to begin.</p>
                 </div>`;
-            setStatus(false);
+            setStatus(hwLiveNow);
             return;
         }
 
         // 3. Fetch hardware liveness
         const hwLive = await fetchLiveStatus();
+
+        // Detect the stopped→moving edge as early as possible (before
+        // todayDocs is filtered below) so a fresh run's sessionStartTs cutoff
+        // is already in effect this same tick — otherwise the newly-resumed
+        // run would render one more tick using the OLD accumulated session.
+        const odometerStoppedNow = hwLive ? await isOdometerStopped() : false;
+        if (wasOdometerStopped && !odometerStoppedNow && hwLive) {
+            resetRunState('odometer resumed after stop — starting new run');
+        }
+        wasOdometerStopped = odometerStoppedNow;
 
         const useRouteTape = !!(routeTapeData && routeTapeKmNums.length);
         if (!useRouteTape) {
@@ -868,7 +1222,15 @@
         // 2. Determine today's date and filter today's docs
         const todayStart = getTodayStart();
         todayDocs = allDocs.filter(d => isSameDate(d.timestamp, todayStart));
+        // If a run reset has happened (new route tape, or resumed-after-stop),
+        // exclude every doc from before that moment — otherwise the "fresh"
+        // run would immediately re-absorb earlier-today records that happen
+        // to land in KM0's distance range and look like it never reset at all.
+        if (sessionStartTs != null) {
+            todayDocs = todayDocs.filter(d => new Date(d.timestamp).getTime() >= sessionStartTs);
+        }
         const hasTodayData = todayDocs.length > 0;
+        resetKmHistoryIfNewDay(todayStart);
 
         let sessionDocs, historical;
 
@@ -893,8 +1255,22 @@
             }
 
             if (hwLive) {
-                if (resolved.loc) {
+                if (odometerStoppedNow) {
+                    // Train stationary — freeze exactly here. Don't touch
+                    // lastCard/kmIdx/toolbarCount (they stay at whatever they
+                    // were on the last real moving reading), and don't build
+                    // a new/growing card, so the pts counter stops climbing
+                    // and Blocks/Peak Distribution/Worst Peaks stop updating
+                    // until the odometer reports movement again.
+                    setStatus(hwLive);
+                    renderOdometerStopped(lastCard ? { ...lastCard, completed: true } : null);
+                } else if (resolved.loc) {
                     const { km, kmIdx, kmStart, kmEnd } = resolved.loc;
+                    // Archive every KM before this one that just finished —
+                    // built from the whole today's-session data (not just
+                    // sessionDocs' current tail), so a completed KM's card
+                    // is final and won't be recomputed again later.
+                    archiveCompletedKms(kmIdx, todayDocs);
                     const kmDocsSlice = sessionDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
                     const card = buildRouteTapeCard(kmDocsSlice, km, kmStart, true);
                     card.historical = false;
@@ -904,19 +1280,24 @@
                     renderCard(card);
                 } else {
                     // Distance has run past the end of the uploaded route
-                    // tape — show the last KM fully closed out.
-                    const lastIdx = routeTapeKmNums.length - 1;
-                    const lastKm = routeTapeKmNums[lastIdx];
-                    const kmStart = cumulativeDistanceStart(lastIdx);
-                    const lastKmDocs = sessionDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart);
-                    const card = buildRouteTapeCard(lastKmDocs, lastKm, kmStart, false);
-                    card.historical = false;
-                    card.routeTapeExhausted = true;
+                    // tape — the run is over. Archive the final KM (if not
+                    // already archived) and show a completion state instead
+                    // of endlessly re-rendering the last KM as if it were
+                    // still an active, growing "current" KM.
+                    archiveCompletedKms(routeTapeKmNums.length, todayDocs);
+                    runComplete = true;
                     setStatus(hwLive);
                     setToolbarCount(routeTapeKmNums.length);
-                    lastCard = card;
-                    renderCard(card);
+                    lastCard = null;
+                    renderRunComplete();
                 }
+            } else if (runComplete) {
+                // Went offline after the run had already completed (route
+                // tape exhausted) — keep showing the completion state, not
+                // a stale "last live card" (there isn't one; lastCard was
+                // cleared when runComplete was set).
+                setStatus(hwLive);
+                renderRunComplete();
             } else if (lastCard) {
                 // Just went offline (or reloaded while a live card was
                 // already cached) — freeze exactly what was last showing
@@ -931,13 +1312,23 @@
                 // No live card cached yet (e.g. fresh page load while
                 // hardware is already offline) — fall back to showing the
                 // last completed route-tape KM, same as before.
+                //
+                // NOTE: this slices from todayDocs, not sessionDocs.
+                // sessionDocs is only the trailing CONTIGUOUS run (see
+                // currentRunDocs()) — on a fresh offline page-load that run
+                // can be a short/empty straggler tail with no records
+                // inside the previous completed KM's range at all, which
+                // rendered the whole report blank ("No block data yet.")
+                // instead of the last saved values. todayDocs still keeps
+                // this scoped to today (not all-time history), it just
+                // isn't restricted to the last unbroken run.
                 const completedIdx = resolved.loc ? resolved.loc.kmIdx : routeTapeKmNums.length;
                 if (completedIdx > 0) {
                     const lastIdx = completedIdx - 1;
                     const lastKm = routeTapeKmNums[lastIdx];
                     const kmStart = cumulativeDistanceStart(lastIdx);
                     const kmEnd = kmStart + routeTapeData.kmLengths[lastKm];
-                    const lastKmDocs = sessionDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
+                    const lastKmDocs = todayDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
                     const card = buildRouteTapeCard(lastKmDocs, lastKm, kmStart, false, todayDocs);
                     card.historical = false;
                     setStatus(hwLive);
@@ -946,7 +1337,7 @@
                     renderCard(card);
                 } else {
                     const firstKm = routeTapeKmNums[0];
-                    const kmDocsSlice = sessionDocs.filter(d => d.distance_m != null && d.distance_m < routeTapeData.kmLengths[firstKm]);
+                    const kmDocsSlice = todayDocs.filter(d => d.distance_m != null && d.distance_m < routeTapeData.kmLengths[firstKm]);
                     const card = buildRouteTapeCard(kmDocsSlice, firstKm, 0, false, todayDocs);
                     card.historical = false;
                     setStatus(hwLive);
@@ -958,11 +1349,16 @@
             return;
         }
 
-        // 4. No data today → fallback to the most recent date that has data,
-        // isolated to its own trailing contiguous run for the same reason.
-        const lastDoc = allDocs[allDocs.length - 1];
-        const lastDate = lastDoc.timestamp.slice(0, 10);
-        const prevDayDocs = currentRunDocs(allDocs.filter(d => isSameDate(d.timestamp, lastDate)));
+        // 4. No data today → fallback to the most recent date that has data.
+        // Was: currentRunDocs(allDocs.filter(d => isSameDate(...))) — filters
+        // to the last record's calendar date FIRST, then runs the gap
+        // detector on that. A real activation spanning midnight would get
+        // clipped at the date boundary before the gap detector even runs.
+        // Using runDocsAroundAnchor(allDocs, lastIdx, ...) instead
+        // reconstructs the run purely from time gaps, with no date
+        // boundary in the way — consistent with the historical-anchor fix
+        // above.
+        const prevDayDocs = runDocsAroundAnchor(allDocs, allDocs.length - 1, ACTIVATION_GAP_MINUTES);
 
         const resolvedPrev = resolveCurrentKm(prevDayDocs);
 
@@ -978,7 +1374,7 @@
             const kmStart = cumulativeDistanceStart(lastIdx);
             const kmEnd = kmStart + routeTapeData.kmLengths[lastKm];
             const lastKmDocs = prevDayDocs.filter(d => d.distance_m != null && d.distance_m >= kmStart && d.distance_m < kmEnd);
-            const card = buildRouteTapeCard(lastKmDocs, lastKm, kmStart, false);
+            const card = buildRouteTapeCard(lastKmDocs, lastKm, kmStart, false, prevDayDocs);
             card.historical = true;
             setStatus(hwLive);
             setToolbarCount(completedIdxPrev);
@@ -987,7 +1383,7 @@
         } else {
             const firstKm = routeTapeKmNums[0];
             const kmDocsSlice = prevDayDocs.filter(d => d.distance_m != null && d.distance_m < routeTapeData.kmLengths[firstKm]);
-            const card = buildRouteTapeCard(kmDocsSlice, firstKm, 0, false);
+            const card = buildRouteTapeCard(kmDocsSlice, firstKm, 0, false, prevDayDocs);
             card.historical = true;
             setStatus(hwLive);
             setToolbarCount(0);
@@ -1179,7 +1575,14 @@
 
             const wp = card.worstPeaks || {};
             ['L-LAT','L-VERT','R-LAT','R-VERT','P-LAT','P-VERT'].forEach(param => {
-                const vals = (wp[param] || []).map(v => fmt(v,1));
+                // Each entry is {value, meter, timestamp} (see
+                // computeWorstPeaks()) — must read v.value, not fmt(v)
+                // directly. Passing the whole object to fmt() always
+                // resolved to '—' via isNaN(object)===true, which is why
+                // this column was blank in every exported CSV even when
+                // Peak Distribution (built from the same worstPeaks data)
+                // showed real nonzero counts.
+                const vals = (wp[param] || []).map(v => fmt(v.value, 1));
                 while (vals.length < 10) vals.push('—');
                 rows.push([param, ...vals].join(','));
             });

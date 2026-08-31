@@ -1077,8 +1077,8 @@ app.get('/api/history/distance-chart', async (req, res) => {
 });
 
 app.get('/api/impacts', async (req, res) => {
+    const { from, to, hours } = req.query;
     try {
-        const { from, to, hours } = req.query;
         let where = '', params = [];
         if (from && to) {
             where = 'WHERE timestamp >= $1 AND timestamp <= $2';
@@ -1387,11 +1387,36 @@ app.get('/api/management/system-health', async (req, res) => {
 app.get('/api/monitoring/all', async (req, res) => {
     try {
         if (!pgReady) return res.status(503).json({ error: 'Database not ready' });
+        // Optional ?date=YYYY-MM-DD scopes the query to one IST calendar day
+        // instead of pulling the whole table, so acceleration-km.js's 5s
+        // live poll stays cheap regardless of table size. This is purely an
+        // optimization for the caller that opts in — omitting ?date=
+        // behaves exactly as before (full table), so nothing that already
+        // depends on the unfiltered shape breaks.
+        const { date } = req.query;
+        const params = [];
+        let where = '';
+        if (date) {
+            params.push(new Date(`${date}T00:00:00+05:30`).toISOString());
+            params.push(new Date(`${date}T23:59:59+05:30`).toISOString());
+            where = `WHERE timestamp >= $${params.length - 1} AND timestamp <= $${params.length}`;
+        }
         const r = await pool.query(`
             SELECT device_id, x_axis, y_axis, z_axis, g_force, rms_v, rms_l,
                    sd_v, sd_l, p2p_v, p2p_l, peak, fs, window_ms, distance_m, timestamp, type
-            FROM monitoring_data ORDER BY timestamp ASC LIMIT 500000
-        `);
+            FROM monitoring_data ${where} ORDER BY timestamp DESC LIMIT 500000
+        `, params);
+        // Table has grown past the LIMIT — DESC+LIMIT keeps the most RECENT
+        // 500k rows (what every caller actually needs: live report, "last
+        // activation" fallback). The old ASC+LIMIT silently kept only the
+        // OLDEST 500k instead, dropping all recent data once the table
+        // passed 500k rows — which is why the "last completed KM"/"last
+        // activation" fallbacks kept coming back empty: they were searching
+        // through months-old data that predates the current route tape,
+        // never seeing anything close to "today". acceleration-km.js
+        // re-sorts ascending client-side already, so this needs no
+        // frontend change.
+        r.rows.reverse();
         res.json(r.rows.map(normMonitoring));
     } catch (e) {
         console.error('/api/monitoring/all error:', e.message);
@@ -1421,6 +1446,43 @@ app.get('/api/logs/odometer', async (req, res) => {
     }
 });
 
+// ── Full odometer history — used by acceleration-km.js to derive each
+// monitoring_data record's real distance_m from the odometer's own
+// timestamped readings (nearest-preceding match) instead of trusting
+// whatever distance_m happened to be stamped onto the accelerometer row at
+// insert time. No LIMIT cap (unlike /api/logs/odometer, which is UI-log
+// oriented and capped at 2000) — the KM report needs the full series to
+// correlate against the full monitoring_data history. ─────────────────────
+app.get('/api/odometer/all', async (req, res) => {
+    try {
+        if (!pgReady) return res.json([]);
+        // Same optional ?date= scoping as /api/monitoring/all — omitted,
+        // behaves exactly as before (full table).
+        const { date } = req.query;
+        const params = [];
+        let where = '';
+        if (date) {
+            params.push(new Date(`${date}T00:00:00+05:30`).toISOString());
+            params.push(new Date(`${date}T23:59:59+05:30`).toISOString());
+            where = `WHERE timestamp >= $${params.length - 1} AND timestamp <= $${params.length}`;
+        }
+        const r = await pool.query(
+            `SELECT timestamp, enc_km, enc_m, enc_mm, speed_ms, speed_kmh
+             FROM odometer_data ${where} ORDER BY timestamp DESC LIMIT 1000000`,
+            params
+        );
+        r.rows.reverse(); // same DESC+LIMIT-then-reverse fix as /api/monitoring/all above
+        res.json(r.rows.map(row => ({
+            timestamp: row.timestamp,
+            distance_m: row.enc_km * 1000 + row.enc_m + row.enc_mm / 1000,
+            speedMs: row.speed_ms, speedKmh: row.speed_kmh,
+        })));
+    } catch (e) {
+        console.error('/api/odometer/all error:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // Latest single odometer reading — used by dashboards that show live
 // distance/speed and want it driven directly by the encoder's own cadence
 // rather than whatever totalDistanceM happened to be at the last GPS fix
@@ -1437,6 +1499,7 @@ app.get('/api/latest/odometer', async (req, res) => {
         const row = r.rows[0];
         res.json({
             timestamp: row.timestamp,
+            km: row.enc_km, meter: row.enc_m, mm: row.enc_mm,
             totalDistanceM: row.enc_km * 1000 + row.enc_m + row.enc_mm / 1000,
             speedMs: row.speed_ms, speedKmh: row.speed_kmh,
         });
@@ -2380,6 +2443,40 @@ function handleOdometerSocket(socket, firstChunk) {
                 continue;
             }
 
+            // Reject an all-zero packet as a board reset/glitch, not a real
+            // reading. COUNT/KM/METER/MM are cumulative encoder counts —
+            // they never legitimately drop back to 0 mid-run (only SPEED
+            // does that, when genuinely stationary). COUNT===0 in
+            // particular only happens right after the board reboots.
+            // Saving these to odometer_data was corrupting the whole run's
+            // distance series: every /api/odometer/all-based lookup picks
+            // the nearest-preceding reading by timestamp, so one stray
+            // all-zero row made distance (and therefore the KM report)
+            // look like it reset to 0 for every record between that glitch
+            // and the next real reading. Skipped entirely — not persisted,
+            // not applied to totalDistanceM, not broadcast as a real
+            // reading — so a genuine reconnect just waits for the next
+            // real packet instead of momentarily reporting 0.
+            const isAllZeroGlitch = parsed.count === 0 && parsed.km === 0 && parsed.meter === 0
+                && parsed.mm === 0 && parsed.speedMs === 0 && parsed.speedKmh === 0;
+            if (isAllZeroGlitch) {
+                console.log('[ODOMETER-TCP] *** ALL-ZERO PACKET IGNORED (board reset glitch, not a real reading) ***');
+                continue;
+            }
+
+            // Train stopped (speed genuinely 0, but COUNT/KM/METER/MM still
+            // hold real cumulative values — this is NOT the reset glitch
+            // above). Per requirement: while stopped, don't log to console,
+            // don't broadcast as a "live" update, and don't persist to
+            // odometer_data — the run simply freezes at the last real
+            // moving reading already saved/shown. Skipped up here, before
+            // the console.log/io.emit/db insert below, so none of those
+            // three things happen for a stopped packet.
+            const isStopped = parsed.speedMs === 0 && parsed.speedKmh === 0;
+            if (isStopped) {
+                continue;
+            }
+
             console.log(`[ODOMETER-TCP] Count:${parsed.count} Dist:${parsed.km}KM ${parsed.meter}M ${parsed.mm}MM Speed:${parsed.speedMs.toFixed(3)}m/s ${parsed.speedKmh.toFixed(2)}km/h`);
 
             // totalDistanceM is now sourced from the encoder directly (a real
@@ -3015,11 +3112,12 @@ function buildKmWiseReportCsv(docsForDay, reportDate) {
         rows.push("");
 
         rows.push("BLOCKS SUMMARY");
-        rows.push("LOC,Left RMS V,Left RMS L,Left SD V,Left SD L,Right RMS V,Right RMS L,Right SD V,Right SD L,Pivot RMS V,Pivot RMS L,Pivot SD V,Pivot SD L");
+        rows.push("LOC,,Left RMS V,Left RMS L,Left SD V,Left SD L,Right RMS V,Right RMS L,Right SD V,Right SD L,Pivot RMS V,Pivot RMS L,Pivot SD V,Pivot SD L");
         card.blocks.forEach(blk => {
             const l = blk.left || {}, r = blk.right || {}, p = blk.pivot || {};
             rows.push([
                 blk.label,
+                '',
                 kmFmt(l.rmsV), kmFmt(l.rmsL), kmFmt(l.sdV, 3), kmFmt(l.sdL, 3),
                 kmFmt(r.rmsV), kmFmt(r.rmsL), kmFmt(r.sdV, 3), kmFmt(r.sdL, 3),
                 kmFmt(p.rmsV), kmFmt(p.rmsL), kmFmt(p.sdV, 3), kmFmt(p.sdL, 3),
@@ -3353,12 +3451,14 @@ app.post('/api/chainage-preview', chainagePreviewUpload.single('file'), (req, re
     };
     saveChainagePreview(chainagePreview);
     console.log(`[chainage-preview] Uploaded ${req.file.originalname}: ${rows.length} rows`);
+    io.emit('route-tape-updated', chainagePreview);
     res.json({ success: true, chainagePreview });
 });
 
 app.delete('/api/chainage-preview', (req, res) => {
     chainagePreview = null;
     saveChainagePreview(chainagePreview);
+    io.emit('route-tape-updated', chainagePreview);
     res.json({ success: true });
 });
 

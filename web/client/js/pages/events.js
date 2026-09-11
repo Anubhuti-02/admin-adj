@@ -443,8 +443,12 @@ function cardHTML(ev, idx) {
 
     const topRowExtra = viewModeVal === 'raw' ? '' : pClassBadge(ev.pClass);
 
+    const band      = highestBand(ev);
+    const bandColor = band ? (BAND_COLORS[band] || '#94a3b8') : '#94a3b8';
+
     return `
-    <div class="event-card event-${ev.severity}${ev.isNew ? ' event-flash' : ''}${hasGps ? ' event-clickable' : ''}"
+    <div class="event-card${ev.isNew ? ' event-flash' : ''}${hasGps ? ' event-clickable' : ''}"
+        style="border-left:4px solid ${bandColor};"
         ${hasGps ? `onclick="goToMapEvent(${idx})" title="View on map"` : ''}>
         <div class="event-left">
             <div class="event-top-row">
@@ -460,10 +464,39 @@ function cardHTML(ev, idx) {
             </div>
         </div>
         <div class="event-right">
-            <span class="event-peak peak-${ev.severity}">${ev.peak.toFixed(1)} g</span>
-            <span class="sev-label sev-${ev.severity}">${ev.severity.toUpperCase()}</span>
+            <span class="event-peak" style="color:${bandColor};">${crossedValueHTML(ev)}</span>
         </div>
     </div>`;
+}
+
+// Highest-priority P-band (P3 > P2 > P1) actually crossed by this event —
+// checks the raw LAT/VERT axis bands first, falling back to the peak-based
+// pClass so peak-only rows still get a band to colour by.
+const BAND_PRIORITY = { P1: 1, P2: 2, P3: 3 };
+const BAND_COLORS   = { P1: '#22c55e', P2: '#f59e0b', P3: '#ef4444' };
+
+function highestBand(ev) {
+    const candidates = [ev.latBand, ev.vertBand, ev.pClass].filter(Boolean);
+    if (!candidates.length) return null;
+    return candidates.reduce((a, b) => (BAND_PRIORITY[b] > BAND_PRIORITY[a] ? b : a));
+}
+
+// Exact axis value(s) that actually crossed a configured limit (raw threshold
+// crossing), shown as plain numbers — no LAT/VERT label. If only LAT crossed,
+// show LAT's value; if only VERT crossed, show VERT's value; if both crossed,
+// show both side by side. Falls back to the peak g value if neither axis
+// registered a crossing (e.g. legacy/peak-only events).
+function crossedValueHTML(ev) {
+    const latHit  = ev.latLimit  != null && ev.xVal != null;
+    const vertHit = ev.vertLimit != null && ev.yVal != null;
+
+    if (latHit && vertHit) {
+        return `<span class="crossed-vals">${Math.abs(ev.xVal).toFixed(2)} g&nbsp;&nbsp;${Math.abs(ev.yVal).toFixed(2)} g</span>`;
+    }
+    if (latHit)  return `${Math.abs(ev.xVal).toFixed(2)} g`;
+    if (vertHit) return `${Math.abs(ev.yVal).toFixed(2)} g`;
+
+    return `${ev.peak.toFixed(1)} g`;
 }
 
 function goToMapEvent(idx) {
